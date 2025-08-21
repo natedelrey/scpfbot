@@ -119,7 +119,7 @@ async def post_autocomplete(interaction: discord.Interaction, current: str) -> l
         rows = await connection.fetch("SELECT name FROM recruitment_posts WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25", interaction.guild.id, f'%{current}%')
     return [app_commands.Choice(name=row['name'], value=row['name']) for row in rows]
 
-# --- NEW NOTIFICATION & APPLICATION COMMANDS ---
+# --- NOTIFICATION & APPLICATION COMMANDS ---
 
 @bot.tree.command(name="notify", description="Sends a Class-E or Blacklist notification to a user.")
 @has_any_role(NOTIFY_AND_APP_ROLES)
@@ -186,7 +186,7 @@ async def process_application(interaction: discord.Interaction, message_link: st
     
     embed = discord.Embed(title=f"{applicant.display_name} | {app_level}Application {status}", color=color, timestamp=datetime.datetime.utcnow())
     embed.description = f"{applicant.mention}'s {app_level.lower()}application has been **{status}**."
-    embed.add_field(name="Details" if accepted else "Reason", value=details, inline=False)
+    embed.add_field(name="Reason", value=details, inline=False)
     embed.set_footer(text=f"Processed by {interaction.user.display_name}")
 
     await results_channel.send(embed=embed)
@@ -194,9 +194,9 @@ async def process_application(interaction: discord.Interaction, message_link: st
 
 @bot.tree.command(name="accept", description="Accept a user's application.")
 @has_any_role(NOTIFY_AND_APP_ROLES)
-@app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", level="The level/role they were accepted for.")
-async def accept(interaction: discord.Interaction, message_link: str, applicant: discord.Member, level: str):
-    await process_application(interaction, message_link, applicant, accepted=True, details=f"Accepted for: **{level}**")
+@app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", reason="Optional reason for acceptance.")
+async def accept(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
+    await process_application(interaction, message_link, applicant, accepted=True, details=reason)
 
 @bot.tree.command(name="reject", description="Reject a user's application.")
 @has_any_role(NOTIFY_AND_APP_ROLES)
@@ -204,7 +204,7 @@ async def accept(interaction: discord.Interaction, message_link: str, applicant:
 async def reject(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
     await process_application(interaction, message_link, applicant, accepted=False, details=reason)
 
-# --- EXISTING COMMANDS ---
+# --- ANNOUNCEMENT & SSU COMMANDS ---
 
 @bot.tree.command(name="ssu", description="Announce a Server Start Up (SSU).")
 @app_commands.checks.cooldown(1, 600, key=lambda i: i.guild_id)
@@ -242,6 +242,12 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
         content = ping_value
         if ping_value.isdigit(): content = f"<@&{ping_value}>"
         await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
+
+# --- RECRUITMENT POST MANAGEMENT COMMANDS ---
+
+@bot.tree.command(name="formattext", description="Formats multi-line text with '\\n' for use in other commands.")
+async def formattext(interaction: discord.Interaction):
+    await interaction.response.send_modal(FormatModal())
 
 @bot.tree.command(name="saverecruitmentpost", description="Saves a recruitment post template to the database.")
 @has_any_role(EP_AND_ABOVE_ROLES)
