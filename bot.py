@@ -32,6 +32,9 @@ DD_AND_ABOVE_ROLES = [
     "1246963191699734569", "1233139781840670742", "1233139781840670743",
     "1233139781840670746"
 ]
+# New list for commands that require EP+ and the special role
+NOTIFY_AND_APP_ROLES = EP_AND_ABOVE_ROLES + ["1234517225206059019"]
+
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
@@ -119,26 +122,31 @@ async def post_autocomplete(interaction: discord.Interaction, current: str) -> l
 # --- NEW NOTIFICATION & APPLICATION COMMANDS ---
 
 @bot.tree.command(name="notify", description="Sends a Class-E or Blacklist notification to a user.")
-@has_any_role(EP_AND_ABOVE_ROLES)
-@app_commands.describe(user="The user to notify.", type="The type of notification.", reason="The reason for this action.", duration="The duration of this action.", trello_card="Link to the user's Trello card.")
-@app_commands.choices(type=[app_commands.Choice(name="Class-E", value="Class-E"), app_commands.Choice(name="Blacklist", value="Blacklist")])
-async def notify(interaction: discord.Interaction, user: discord.Member, type: app_commands.Choice[str], reason: str, duration: str, trello_card: str):
-    embed = discord.Embed(
-        title=f"Notification of {type.name}",
-        color=discord.Color.orange(),
-        timestamp=datetime.datetime.utcnow()
-    )
+@has_any_role(NOTIFY_AND_APP_ROLES)
+@app_commands.describe(user="The user to notify.", type="The type of notification.", reason="The reason for this action.", duration="The duration of this action.", trello_card="Link to the user's Trello card.", appealable="Whether the user can appeal this action.", notifier_department="The department issuing the notification.")
+@app_commands.choices(
+    type=[app_commands.Choice(name="Class-E", value="Class-E"), app_commands.Choice(name="Blacklist", value="Blacklist")],
+    notifier_department=[app_commands.Choice(name="IA", value="IA"), app_commands.Choice(name="EC", value="EC")]
+)
+async def notify(interaction: discord.Interaction, user: discord.Member, type: app_commands.Choice[str], reason: str, duration: str, trello_card: str, appealable: bool, notifier_department: app_commands.Choice[str]):
+    embed = discord.Embed(title=f"Notification of {type.name}", color=discord.Color.orange(), timestamp=datetime.datetime.utcnow())
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.add_field(name="Duration", value=duration, inline=False)
     embed.add_field(name="Trello Card", value=f"[View Card]({trello_card})", inline=False)
-    embed.add_field(name="Appeals", value="You may be eligible to appeal this decision. Please refer to the appropriate server for more information.", inline=False)
     
     view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="IA Server", style=discord.ButtonStyle.link, url="https://discord.gg/rQwMDFbfEg"))
-    view.add_item(discord.ui.Button(label="EC Server", style=discord.ButtonStyle.link, url="https://discord.gg/pAWjndT9jF"))
+    if appealable:
+        appeal_text = f"You must appeal to **{notifier_department.name}** as you were disciplined by **{notifier_department.name}**."
+        embed.add_field(name="Appeals", value=appeal_text, inline=False)
+        if notifier_department.value == "IA":
+            view.add_item(discord.ui.Button(label="IA Server", style=discord.ButtonStyle.link, url="https://discord.gg/rQwMDFbfEg"))
+        elif notifier_department.value == "EC":
+            view.add_item(discord.ui.Button(label="EC Server", style=discord.ButtonStyle.link, url="https://discord.gg/pAWjndT9jF"))
+    else:
+        embed.add_field(name="Appeals", value="This decision is **unappealable**.", inline=False)
 
     try:
-        await user.send(embed=embed, view=view)
+        await user.send(embed=embed, view=view if appealable else None)
         await interaction.response.send_message(f"✅ Successfully sent a {type.name} notification to {user.mention}.", ephemeral=True)
     except discord.Forbidden:
         await interaction.response.send_message(f"⚠️ Could not send a DM to {user.mention}. Their DMs are likely closed.", ephemeral=True)
@@ -150,7 +158,6 @@ async def process_application(interaction: discord.Interaction, message_link: st
     if not results_channel:
         return await interaction.response.send_message("Error: Application results channel not found.", ephemeral=True)
 
-    # Regex to parse message link
     match = re.match(r"https://discord.com/channels/\d+/(\d+)/(\d+)", message_link)
     if not match:
         return await interaction.response.send_message("Invalid message link format.", ephemeral=True)
@@ -163,23 +170,22 @@ async def process_application(interaction: discord.Interaction, message_link: st
     except (discord.NotFound, discord.Forbidden):
         return await interaction.response.send_message("Could not find the application message. Please check the link.", ephemeral=True)
 
-    # Add reaction
     reaction = "✅" if accepted else "❌"
     try:
         await message.add_reaction(reaction)
     except discord.Forbidden:
         print(f"Could not add reaction to message {message_id}. Missing permissions.")
 
-    # Create and send result embed
+    app_level = ""
+    if "level-1" in channel.name.lower(): app_level = "Level-1 "
+    elif "level-2" in channel.name.lower(): app_level = "Level-2 "
+    elif "level-3" in channel.name.lower(): app_level = "Level-3 "
+
     status = "Accepted" if accepted else "Denied"
     color = discord.Color.green() if accepted else discord.Color.red()
     
-    embed = discord.Embed(
-        title=f"{applicant.display_name} | Application {status}",
-        color=color,
-        timestamp=datetime.datetime.utcnow()
-    )
-    embed.description = f"{applicant.mention}'s application has been **{status}**."
+    embed = discord.Embed(title=f"{applicant.display_name} | {app_level}Application {status}", color=color, timestamp=datetime.datetime.utcnow())
+    embed.description = f"{applicant.mention}'s {app_level.lower()}application has been **{status}**."
     embed.add_field(name="Details" if accepted else "Reason", value=details, inline=False)
     embed.set_footer(text=f"Processed by {interaction.user.display_name}")
 
@@ -187,13 +193,13 @@ async def process_application(interaction: discord.Interaction, message_link: st
     await interaction.response.send_message(f"Application for {applicant.mention} has been processed.", ephemeral=True)
 
 @bot.tree.command(name="accept", description="Accept a user's application.")
-@has_any_role(EP_AND_ABOVE_ROLES)
+@has_any_role(NOTIFY_AND_APP_ROLES)
 @app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", level="The level/role they were accepted for.")
 async def accept(interaction: discord.Interaction, message_link: str, applicant: discord.Member, level: str):
     await process_application(interaction, message_link, applicant, accepted=True, details=f"Accepted for: **{level}**")
 
 @bot.tree.command(name="reject", description="Reject a user's application.")
-@has_any_role(EP_AND_ABOVE_ROLES)
+@has_any_role(NOTIFY_AND_APP_ROLES)
 @app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", reason="Optional reason for rejection.")
 async def reject(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
     await process_application(interaction, message_link, applicant, accepted=False, details=reason)
