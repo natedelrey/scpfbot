@@ -143,8 +143,8 @@ async def ssu(interaction: discord.Interaction):
 @bot.tree.command(name="announce", description="Create a highly customizable server announcement.")
 @has_any_role(DD_AND_ABOVE_ROLES)
 @app_commands.describe(title="The title of the announcement.", message="The main content. Use '\\n' for new lines.")
-@app_commands.choices(color=COLOR_CHOICES)
-async def announce(interaction: discord.Interaction, title: str, message: str, color: app_commands.Choice[str] = None, image_url: str = None, thumbnail_url: str = None, footer_text: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None):
+@app_commands.choices(color=COLOR_CHOICES, ping_role=PING_CHOICES)
+async def announce(interaction: discord.Interaction, title: str, message: str, color: app_commands.Choice[str] = None, image_url: str = None, thumbnail_url: str = None, footer_text: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
     announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
     if not announcement_channel: return await interaction.response.send_message("Error: Announcement channel not found.", ephemeral=True)
     embed_color = get_discord_color(color.value if color else "default")
@@ -159,6 +159,14 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
     view = create_button_view(buttons_data)
     await announcement_channel.send(embed=embed, view=view)
     await interaction.response.send_message("Announcement has been sent!", ephemeral=True)
+
+    # Handle the ping
+    if ping_role and ping_role.value != "none":
+        ping_value = ping_role.value
+        content = ping_value
+        if ping_value.isdigit(): # It's a role ID
+            content = f"<@&{ping_value}>"
+        await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
 
 # --- RECRUITMENT POST MANAGEMENT COMMANDS ---
 
