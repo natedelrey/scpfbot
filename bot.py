@@ -99,7 +99,7 @@ async def setup_database():
                 CREATE TABLE IF NOT EXISTS recruitment_posts (
                     id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, name TEXT NOT NULL,
                     title TEXT NOT NULL, details TEXT NOT NULL, image_url TEXT,
-                    buttons JSONB, ping_role TEXT, UNIQUE(guild_id, name)
+                    buttons JSONB, ping_role TEXT, color TEXT, UNIQUE(guild_id, name)
                 );
             ''')
         print("Successfully connected to PostgreSQL and verified table.")
@@ -159,13 +159,10 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
     view = create_button_view(buttons_data)
     await announcement_channel.send(embed=embed, view=view)
     await interaction.response.send_message("Announcement has been sent!", ephemeral=True)
-
-    # Handle the ping
     if ping_role and ping_role.value != "none":
         ping_value = ping_role.value
         content = ping_value
-        if ping_value.isdigit(): # It's a role ID
-            content = f"<@&{ping_value}>"
+        if ping_value.isdigit(): content = f"<@&{ping_value}>"
         await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
 
 # --- RECRUITMENT POST MANAGEMENT COMMANDS ---
@@ -177,8 +174,8 @@ async def formattext(interaction: discord.Interaction):
 @bot.tree.command(name="saverecruitmentpost", description="Saves a recruitment post template to the database.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.describe(name="A short, unique name to save this post as (e.g., 'md-recruitment').")
-@app_commands.choices(ping_role=PING_CHOICES)
-async def saverecruitmentpost(interaction: discord.Interaction, name: str, title: str, details: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
+@app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
+async def saverecruitmentpost(interaction: discord.Interaction, name: str, title: str, details: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     name = name.lower().strip()
     buttons = []
@@ -186,12 +183,13 @@ async def saverecruitmentpost(interaction: discord.Interaction, name: str, title
     if button2_text and button2_url: buttons.append({"label": button2_text, "url": button2_url})
     buttons_json = json.dumps(buttons)
     ping_value = ping_role.value if ping_role and ping_role.value != "none" else None
+    color_value = color.value if color else "blue"
     try:
         async with bot.db_pool.acquire() as connection:
             await connection.execute('''
-                INSERT INTO recruitment_posts (guild_id, name, title, details, image_url, buttons, ping_role) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (guild_id, name) DO UPDATE SET title = EXCLUDED.title, details = EXCLUDED.details, image_url = EXCLUDED.image_url, buttons = EXCLUDED.buttons, ping_role = EXCLUDED.ping_role;
-            ''', interaction.guild.id, name, title, details, image_url, buttons_json, ping_value)
+                INSERT INTO recruitment_posts (guild_id, name, title, details, image_url, buttons, ping_role, color) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (guild_id, name) DO UPDATE SET title = EXCLUDED.title, details = EXCLUDED.details, image_url = EXCLUDED.image_url, buttons = EXCLUDED.buttons, ping_role = EXCLUDED.ping_role, color = EXCLUDED.color;
+            ''', interaction.guild.id, name, title, details, image_url, buttons_json, ping_value, color_value)
         await interaction.response.send_message(f"✅ Recruitment post saved/updated with the name: `{name}`", ephemeral=True)
     except Exception as e:
         print(f"Error saving post: {e}")
@@ -201,8 +199,8 @@ async def saverecruitmentpost(interaction: discord.Interaction, name: str, title
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
 @app_commands.describe(name="The name of the post to edit.")
-@app_commands.choices(ping_role=PING_CHOICES)
-async def editrecruitmentpost(interaction: discord.Interaction, name: str, title: str = None, details: str = None, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
+@app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
+async def editrecruitmentpost(interaction: discord.Interaction, name: str, title: str = None, details: str = None, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
@@ -218,10 +216,11 @@ async def editrecruitmentpost(interaction: discord.Interaction, name: str, title
         buttons_json = json.dumps(buttons_list)
         new_ping_role = ping_role.value if ping_role else post_data['ping_role']
         if ping_role and ping_role.value == "none": new_ping_role = None
+        new_color = color.value if color else post_data['color']
         await connection.execute('''
-            UPDATE recruitment_posts SET title = $1, details = $2, image_url = $3, buttons = $4, ping_role = $5
-            WHERE guild_id = $6 AND name = $7
-        ''', new_title, new_details, new_image_url, buttons_json, new_ping_role, interaction.guild.id, name.lower().strip())
+            UPDATE recruitment_posts SET title = $1, details = $2, image_url = $3, buttons = $4, ping_role = $5, color = $6
+            WHERE guild_id = $7 AND name = $8
+        ''', new_title, new_details, new_image_url, buttons_json, new_ping_role, new_color, interaction.guild.id, name.lower().strip())
     await interaction.response.send_message(f"✅ Successfully edited recruitment post: `{name}`", ephemeral=True)
 
 @bot.tree.command(name="repost", description="Posts a saved recruitment announcement from the database.")
@@ -236,7 +235,9 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
     async with bot.db_pool.acquire() as connection:
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
     if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
-    embed = discord.Embed(title=post_data["title"], description=post_data["details"].replace("\\n", "\n"), color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
+    
+    embed_color = get_discord_color(post_data.get("color") or "blue")
+    embed = discord.Embed(title=post_data["title"], description=post_data["details"].replace("\\n", "\n"), color=embed_color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text=f"Posted by {interaction.user.display_name}")
     if post_data.get("image_url"): embed.set_image(url=post_data["image_url"])
     buttons_list = json.loads(post_data.get("buttons", "[]"))
