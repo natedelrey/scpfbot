@@ -7,6 +7,7 @@ import os
 import asyncpg
 from dotenv import load_dotenv
 from typing import List
+import re
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -16,30 +17,25 @@ try:
     ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID"))
     RECRUITMENT_CHANNEL_ID = int(os.getenv("RECRUITMENT_CHANNEL_ID"))
     SSU_CHANNEL_ID = int(os.getenv("SSU_CHANNEL_ID"))
+    APPLICATION_RESULTS_CHANNEL_ID = int(os.getenv("APPLICATION_RESULTS_CHANNEL_ID"))
 except (TypeError, ValueError):
-    print("Error: Channel IDs are not set correctly in your environment variables.")
+    print("Error: A required Channel ID is not set correctly in your environment variables.")
     exit()
 GAME_LINK = os.getenv("GAME_LINK", "https://www.roblox.com/games/17371095768/SCP-Lambda")
 
 # --- ROLE IDs FOR PERMISSIONS ---
-# Note: These are stored as strings to match Discord's API results
 EP_AND_ABOVE_ROLES = [
-    "1233139781823627473", # Executive Personnel
-    "1246963191699734569", # Department Director
-    "1233139781840670742", # Site Director
-    "1233139781840670743", # O5 Council
-    "1233139781840670746", # Other High Rank
+    "1233139781823627473", "1246963191699734569", "1233139781840670742",
+    "1233139781840670743", "1233139781840670746"
 ]
 DD_AND_ABOVE_ROLES = [
-    "1246963191699734569", # Department Director
-    "1233139781840670742", # Site Director
-    "1233139781840670743", # O5 Council
-    "1233139781840670746", # Other High Rank
+    "1246963191699734569", "1233139781840670742", "1233139781840670743",
+    "1233139781840670746"
 ]
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
-intents.message_content = True # Required for potential future features
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.db_pool = None
 
@@ -62,16 +58,13 @@ PING_CHOICES = [
 
 # --- PERMISSION CHECKS ---
 def has_any_role(required_roles: List[str]):
-    """Custom check to see if a user has any of the specified roles."""
     async def predicate(interaction: discord.Interaction) -> bool:
-        if not isinstance(interaction.user, discord.Member):
-            return False
+        if not isinstance(interaction.user, discord.Member): return False
         user_role_ids = {str(role.id) for role in interaction.user.roles}
         return any(role_id in user_role_ids for role_id in required_roles)
     return app_commands.check(predicate)
 
 # --- HELPER FUNCTIONS & CLASSES ---
-
 def get_discord_color(color_name: str) -> discord.Color:
     color_map = {"red": discord.Color.red(), "blue": discord.Color.blue(), "green": discord.Color.green(), "gold": discord.Color.gold(), "orange": discord.Color.orange(), "purple": discord.Color.purple(), "white": discord.Color.from_rgb(255, 255, 255), "black": discord.Color.from_rgb(0, 0, 0), "default": discord.Color.blurple()}
     return color_map.get(color_name, discord.Color.default())
@@ -84,13 +77,12 @@ def create_button_view(buttons_data):
     return view if view.children else None
 
 class FormatModal(discord.ui.Modal, title='Text Formatter'):
-    text_to_format = discord.ui.TextInput(label='Paste your multi-line text here', style=discord.TextStyle.paragraph, placeholder='Your announcement text...\n...with multiple lines...', required=True, max_length=2000)
+    text_to_format = discord.ui.TextInput(label='Paste your multi-line text here', style=discord.TextStyle.paragraph, required=True, max_length=2000)
     async def on_submit(self, interaction: discord.Interaction):
         formatted_text = self.text_to_format.value.replace('\n', '\\n')
         await interaction.response.send_message(f"**Formatted Text (copy this):**\n```\n{formatted_text}\n```", ephemeral=True)
 
 # --- DATABASE & BOT EVENTS ---
-
 async def setup_database():
     try:
         bot.db_pool = await asyncpg.create_pool(DATABASE_URL)
@@ -121,11 +113,92 @@ async def on_ready():
 async def post_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     if not bot.db_pool: return []
     async with bot.db_pool.acquire() as connection:
-        query = "SELECT name FROM recruitment_posts WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25"
-        rows = await connection.fetch(query, interaction.guild.id, f'%{current}%')
+        rows = await connection.fetch("SELECT name FROM recruitment_posts WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25", interaction.guild.id, f'%{current}%')
     return [app_commands.Choice(name=row['name'], value=row['name']) for row in rows]
 
-# --- GENERAL COMMANDS ---
+# --- NEW NOTIFICATION & APPLICATION COMMANDS ---
+
+@bot.tree.command(name="notify", description="Sends a Class-E or Blacklist notification to a user.")
+@has_any_role(EP_AND_ABOVE_ROLES)
+@app_commands.describe(user="The user to notify.", type="The type of notification.", reason="The reason for this action.", duration="The duration of this action.", trello_card="Link to the user's Trello card.")
+@app_commands.choices(type=[app_commands.Choice(name="Class-E", value="Class-E"), app_commands.Choice(name="Blacklist", value="Blacklist")])
+async def notify(interaction: discord.Interaction, user: discord.Member, type: app_commands.Choice[str], reason: str, duration: str, trello_card: str):
+    embed = discord.Embed(
+        title=f"Notification of {type.name}",
+        color=discord.Color.orange(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Duration", value=duration, inline=False)
+    embed.add_field(name="Trello Card", value=f"[View Card]({trello_card})", inline=False)
+    embed.add_field(name="Appeals", value="You may be eligible to appeal this decision. Please refer to the appropriate server for more information.", inline=False)
+    
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="IA Server", style=discord.ButtonStyle.link, url="https://discord.gg/rQwMDFbfEg"))
+    view.add_item(discord.ui.Button(label="EC Server", style=discord.ButtonStyle.link, url="https://discord.gg/pAWjndT9jF"))
+
+    try:
+        await user.send(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Successfully sent a {type.name} notification to {user.mention}.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"⚠️ Could not send a DM to {user.mention}. Their DMs are likely closed.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+
+async def process_application(interaction: discord.Interaction, message_link: str, applicant: discord.Member, accepted: bool, details: str):
+    results_channel = bot.get_channel(APPLICATION_RESULTS_CHANNEL_ID)
+    if not results_channel:
+        return await interaction.response.send_message("Error: Application results channel not found.", ephemeral=True)
+
+    # Regex to parse message link
+    match = re.match(r"https://discord.com/channels/\d+/(\d+)/(\d+)", message_link)
+    if not match:
+        return await interaction.response.send_message("Invalid message link format.", ephemeral=True)
+    
+    channel_id, message_id = map(int, match.groups())
+    
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+    except (discord.NotFound, discord.Forbidden):
+        return await interaction.response.send_message("Could not find the application message. Please check the link.", ephemeral=True)
+
+    # Add reaction
+    reaction = "✅" if accepted else "❌"
+    try:
+        await message.add_reaction(reaction)
+    except discord.Forbidden:
+        print(f"Could not add reaction to message {message_id}. Missing permissions.")
+
+    # Create and send result embed
+    status = "Accepted" if accepted else "Denied"
+    color = discord.Color.green() if accepted else discord.Color.red()
+    
+    embed = discord.Embed(
+        title=f"{applicant.display_name} | Application {status}",
+        color=color,
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.description = f"{applicant.mention}'s application has been **{status}**."
+    embed.add_field(name="Details" if accepted else "Reason", value=details, inline=False)
+    embed.set_footer(text=f"Processed by {interaction.user.display_name}")
+
+    await results_channel.send(embed=embed)
+    await interaction.response.send_message(f"Application for {applicant.mention} has been processed.", ephemeral=True)
+
+@bot.tree.command(name="accept", description="Accept a user's application.")
+@has_any_role(EP_AND_ABOVE_ROLES)
+@app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", level="The level/role they were accepted for.")
+async def accept(interaction: discord.Interaction, message_link: str, applicant: discord.Member, level: str):
+    await process_application(interaction, message_link, applicant, accepted=True, details=f"Accepted for: **{level}**")
+
+@bot.tree.command(name="reject", description="Reject a user's application.")
+@has_any_role(EP_AND_ABOVE_ROLES)
+@app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", reason="Optional reason for rejection.")
+async def reject(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
+    await process_application(interaction, message_link, applicant, accepted=False, details=reason)
+
+# --- EXISTING COMMANDS ---
 
 @bot.tree.command(name="ssu", description="Announce a Server Start Up (SSU).")
 @app_commands.checks.cooldown(1, 600, key=lambda i: i.guild_id)
@@ -142,7 +215,6 @@ async def ssu(interaction: discord.Interaction):
 
 @bot.tree.command(name="announce", description="Create a highly customizable server announcement.")
 @has_any_role(DD_AND_ABOVE_ROLES)
-@app_commands.describe(title="The title of the announcement.", message="The main content. Use '\\n' for new lines.")
 @app_commands.choices(color=COLOR_CHOICES, ping_role=PING_CHOICES)
 async def announce(interaction: discord.Interaction, title: str, message: str, color: app_commands.Choice[str] = None, image_url: str = None, thumbnail_url: str = None, footer_text: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
     announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
@@ -165,15 +237,8 @@ async def announce(interaction: discord.Interaction, title: str, message: str, c
         if ping_value.isdigit(): content = f"<@&{ping_value}>"
         await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
 
-# --- RECRUITMENT POST MANAGEMENT COMMANDS ---
-
-@bot.tree.command(name="formattext", description="Formats multi-line text with '\\n' for use in other commands.")
-async def formattext(interaction: discord.Interaction):
-    await interaction.response.send_modal(FormatModal())
-
 @bot.tree.command(name="saverecruitmentpost", description="Saves a recruitment post template to the database.")
 @has_any_role(EP_AND_ABOVE_ROLES)
-@app_commands.describe(name="A short, unique name to save this post as (e.g., 'md-recruitment').")
 @app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
 async def saverecruitmentpost(interaction: discord.Interaction, name: str, title: str, details: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
@@ -198,7 +263,6 @@ async def saverecruitmentpost(interaction: discord.Interaction, name: str, title
 @bot.tree.command(name="editrecruitmentpost", description="Edits an existing saved recruitment post.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
-@app_commands.describe(name="The name of the post to edit.")
 @app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
 async def editrecruitmentpost(interaction: discord.Interaction, name: str, title: str = None, details: str = None, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
@@ -226,7 +290,6 @@ async def editrecruitmentpost(interaction: discord.Interaction, name: str, title
 @bot.tree.command(name="repost", description="Posts a saved recruitment announcement from the database.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
-@app_commands.describe(name="The name of the saved post to send.", ping_override="Optional: Choose a different ping for this time only.")
 @app_commands.choices(ping_override=PING_CHOICES)
 async def repost(interaction: discord.Interaction, name: str, ping_override: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
@@ -235,7 +298,6 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
     async with bot.db_pool.acquire() as connection:
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
     if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
-    
     embed_color = get_discord_color(post_data.get("color") or "blue")
     embed = discord.Embed(title=post_data["title"], description=post_data["details"].replace("\\n", "\n"), color=embed_color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text=f"Posted by {interaction.user.display_name}")
@@ -257,7 +319,6 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
 @bot.tree.command(name="deleterecruitmentpost", description="Deletes a saved recruitment post.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
-@app_commands.describe(name="The name of the post to delete.")
 async def deleterecruitmentpost(interaction: discord.Interaction, name: str):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
