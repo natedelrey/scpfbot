@@ -389,6 +389,35 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
         if ping_value.isdigit(): content = f"<@&{ping_value}>"
         await recruitment_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
 
+@bot.tree.command(name="testrepost", description="Previews a saved recruitment announcement privately.")
+@has_any_role(EP_AND_ABOVE_ROLES)
+@app_commands.autocomplete(name=post_autocomplete)
+async def testrepost(interaction: discord.Interaction, name: str):
+    if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
+    async with bot.db_pool.acquire() as connection:
+        post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
+    if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
+    
+    embed_color = get_discord_color(post_data.get("color") or "blue")
+    embed = discord.Embed(title=post_data["title"], description=post_data["details"], color=embed_color, timestamp=datetime.datetime.utcnow())
+    embed.set_footer(text=f"Posted by {interaction.user.display_name}")
+    if post_data.get("image_url"): embed.set_image(url=post_data["image_url"])
+    
+    buttons_list = json.loads(post_data.get("buttons", "[]"))
+    view = create_button_view(buttons_list)
+
+    ping_value = post_data.get("ping_role")
+    preview_text = "This is a preview. No pings will be sent."
+    if ping_value:
+        ping_name = ping_value 
+        for choice in PING_CHOICES:
+            if choice.value == ping_value:
+                ping_name = choice.name
+                break
+        preview_text = f"This is a preview. When posted, this will ping **{ping_name}**."
+        
+    await interaction.response.send_message(content=preview_text, embed=embed, view=view, ephemeral=True)
+
 @bot.tree.command(name="deleterecruitmentpost", description="Deletes a saved recruitment post.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
