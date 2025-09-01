@@ -6,7 +6,7 @@ import json
 import os
 import asyncpg
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Optional
 import re
 
 # --- CONFIGURATION ---
@@ -32,9 +32,7 @@ DD_AND_ABOVE_ROLES = [
     "1246963191699734569", "1233139781840670742", "1233139781840670743",
     "1233139781840670746"
 ]
-# New list for commands that require EP+ and the special role
 NOTIFY_AND_APP_ROLES = EP_AND_ABOVE_ROLES + ["1234517225206059019"]
-
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
@@ -67,7 +65,7 @@ def has_any_role(required_roles: List[str]):
         return any(role_id in user_role_ids for role_id in required_roles)
     return app_commands.check(predicate)
 
-# --- HELPER FUNCTIONS & CLASSES ---
+# --- HELPER FUNCTIONS ---
 def get_discord_color(color_name: str) -> discord.Color:
     color_map = {"red": discord.Color.red(), "blue": discord.Color.blue(), "green": discord.Color.green(), "gold": discord.Color.gold(), "orange": discord.Color.orange(), "purple": discord.Color.purple(), "white": discord.Color.from_rgb(255, 255, 255), "black": discord.Color.from_rgb(0, 0, 0), "default": discord.Color.blurple()}
     return color_map.get(color_name, discord.Color.default())
@@ -78,12 +76,6 @@ def create_button_view(buttons_data):
     for button in buttons_data:
         view.add_item(discord.ui.Button(label=button['label'], style=discord.ButtonStyle.link, url=button['url']))
     return view if view.children else None
-
-class FormatModal(discord.ui.Modal, title='Text Formatter'):
-    text_to_format = discord.ui.TextInput(label='Paste your multi-line text here', style=discord.TextStyle.paragraph, required=True, max_length=2000)
-    async def on_submit(self, interaction: discord.Interaction):
-        formatted_text = self.text_to_format.value.replace('\n', '\\n')
-        await interaction.response.send_message(f"**Formatted Text (copy this):**\n```\n{formatted_text}\n```", ephemeral=True)
 
 # --- DATABASE & BOT EVENTS ---
 async def setup_database():
@@ -119,7 +111,114 @@ async def post_autocomplete(interaction: discord.Interaction, current: str) -> l
         rows = await connection.fetch("SELECT name FROM recruitment_posts WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25", interaction.guild.id, f'%{current}%')
     return [app_commands.Choice(name=row['name'], value=row['name']) for row in rows]
 
-# --- NOTIFICATION & APPLICATION COMMANDS ---
+# --- MODALS (FORMS) ---
+class AnnounceModal(discord.ui.Modal, title='Create Announcement'):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+    
+    title_input = discord.ui.TextInput(label='Title', style=discord.TextStyle.short, required=True, max_length=256)
+    message_input = discord.ui.TextInput(label='Message', style=discord.TextStyle.paragraph, required=True, max_length=4000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+        if not announcement_channel: return await interaction.response.send_message("Error: Announcement channel not found.", ephemeral=True)
+        
+        embed_color = get_discord_color(self.kwargs.get('color') or "default")
+        embed = discord.Embed(title=self.title_input.value, description=self.message_input.value, color=embed_color, timestamp=datetime.datetime.utcnow())
+        
+        if self.kwargs.get('image_url'): embed.set_image(url=self.kwargs['image_url'])
+        if self.kwargs.get('thumbnail_url'): embed.set_thumbnail(url=self.kwargs['thumbnail_url'])
+        
+        footer = self.kwargs.get('footer_text') or f"Announcement by {interaction.user.display_name}"
+        embed.set_footer(text=footer)
+        
+        buttons_data = []
+        if self.kwargs.get('button1_text') and self.kwargs.get('button1_url'):
+            buttons_data.append({"label": self.kwargs['button1_text'], "url": self.kwargs['button1_url']})
+        if self.kwargs.get('button2_text') and self.kwargs.get('button2_url'):
+            buttons_data.append({"label": self.kwargs['button2_text'], "url": self.kwargs['button2_url']})
+        
+        view = create_button_view(buttons_data)
+        await announcement_channel.send(embed=embed, view=view)
+        await interaction.response.send_message("Announcement has been sent!", ephemeral=True)
+
+        ping_role = self.kwargs.get('ping_role')
+        if ping_role and ping_role != "none":
+            content = ping_role
+            if ping_role.isdigit(): content = f"<@&{ping_role}>"
+            await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
+
+class SaveRecruitmentModal(discord.ui.Modal, title='Save Recruitment Post'):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+    
+    name_input = discord.ui.TextInput(label='Save Name', style=discord.TextStyle.short, required=True, placeholder="A short, memorable name (e.g., md-recruitment)")
+    title_input = discord.ui.TextInput(label='Title', style=discord.TextStyle.short, required=True, max_length=256)
+    details_input = discord.ui.TextInput(label='Details', style=discord.TextStyle.paragraph, required=True, max_length=4000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
+        name = self.name_input.value.lower().strip()
+        buttons = []
+        if self.kwargs.get('button1_text') and self.kwargs.get('button1_url'): buttons.append({"label": self.kwargs['button1_text'], "url": self.kwargs['button1_url']})
+        if self.kwargs.get('button2_text') and self.kwargs.get('button2_url'): buttons.append({"label": self.kwargs['button2_text'], "url": self.kwargs['button2_url']})
+        
+        buttons_json = json.dumps(buttons)
+        ping_value = self.kwargs.get('ping_role') if self.kwargs.get('ping_role') != "none" else None
+        color_value = self.kwargs.get('color') or "blue"
+        
+        try:
+            async with bot.db_pool.acquire() as connection:
+                await connection.execute('''
+                    INSERT INTO recruitment_posts (guild_id, name, title, details, image_url, buttons, ping_role, color) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (guild_id, name) DO UPDATE SET title = EXCLUDED.title, details = EXCLUDED.details, image_url = EXCLUDED.image_url, buttons = EXCLUDED.buttons, ping_role = EXCLUDED.ping_role, color = EXCLUDED.color;
+                ''', interaction.guild.id, name, self.title_input.value, self.details_input.value, self.kwargs.get('image_url'), buttons_json, ping_value, color_value)
+            await interaction.response.send_message(f"✅ Recruitment post saved/updated with the name: `{name}`", ephemeral=True)
+        except Exception as e:
+            print(f"Error saving post: {e}")
+            await interaction.response.send_message("An error occurred while saving the post.", ephemeral=True)
+
+class EditRecruitmentModal(discord.ui.Modal, title='Edit Recruitment Post'):
+    def __init__(self, name: str, post_data: asyncpg.Record, **kwargs):
+        super().__init__()
+        self.name = name
+        self.post_data = post_data
+        self.kwargs = kwargs
+        
+        self.title_input = discord.ui.TextInput(label='Title', style=discord.TextStyle.short, required=True, max_length=256, default=post_data['title'])
+        self.details_input = discord.ui.TextInput(label='Details', style=discord.TextStyle.paragraph, required=True, max_length=4000, default=post_data['details'])
+        self.add_item(self.title_input)
+        self.add_item(self.details_input)
+        
+    async def on_submit(self, interaction: discord.Interaction):
+        if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
+        
+        new_image_url = self.kwargs.get('image_url') or self.post_data['image_url']
+        buttons_list = json.loads(self.post_data.get("buttons", "[]"))
+        if len(buttons_list) == 0: buttons_list = [{}, {}]
+        elif len(buttons_list) == 1: buttons_list.append({})
+
+        buttons_list[0] = {"label": self.kwargs.get('button1_text') or buttons_list[0].get('label'), "url": self.kwargs.get('button1_url') or buttons_list[0].get('url')}
+        buttons_list[1] = {"label": self.kwargs.get('button2_text') or buttons_list[1].get('label'), "url": self.kwargs.get('button2_url') or buttons_list[1].get('url')}
+        buttons_list = [b for b in buttons_list if b.get('label') and b.get('url')]
+        
+        buttons_json = json.dumps(buttons_list)
+        new_ping_role = self.kwargs.get('ping_role')
+        if new_ping_role is None: new_ping_role = self.post_data['ping_role']
+        if new_ping_role == "none": new_ping_role = None
+
+        new_color = self.kwargs.get('color') or self.post_data['color']
+        
+        async with bot.db_pool.acquire() as connection:
+            await connection.execute('''
+                UPDATE recruitment_posts SET title = $1, details = $2, image_url = $3, buttons = $4, ping_role = $5, color = $6
+                WHERE guild_id = $7 AND name = $8
+            ''', self.title_input.value, self.details_input.value, new_image_url, buttons_json, new_ping_role, new_color, interaction.guild.id, self.name)
+        await interaction.response.send_message(f"✅ Successfully edited recruitment post: `{self.name}`", ephemeral=True)
+
+# --- APPLICATION & NOTIFICATION COMMANDS ---
 
 @bot.tree.command(name="notify", description="Sends a Class-E or Blacklist notification to a user.")
 @has_any_role(NOTIFY_AND_APP_ROLES)
@@ -159,8 +258,7 @@ async def process_application(interaction: discord.Interaction, message_link: st
         return await interaction.response.send_message("Error: Application results channel not found.", ephemeral=True)
 
     match = re.match(r"https://discord.com/channels/\d+/(\d+)/(\d+)", message_link)
-    if not match:
-        return await interaction.response.send_message("Invalid message link format.", ephemeral=True)
+    if not match: return await interaction.response.send_message("Invalid message link format.", ephemeral=True)
     
     channel_id, message_id = map(int, match.groups())
     
@@ -171,10 +269,8 @@ async def process_application(interaction: discord.Interaction, message_link: st
         return await interaction.response.send_message("Could not find the application message. Please check the link.", ephemeral=True)
 
     reaction = "✅" if accepted else "❌"
-    try:
-        await message.add_reaction(reaction)
-    except discord.Forbidden:
-        print(f"Could not add reaction to message {message_id}. Missing permissions.")
+    try: await message.add_reaction(reaction)
+    except discord.Forbidden: print(f"Could not add reaction to message {message_id}. Missing permissions.")
 
     app_level = ""
     if "level-1" in channel.name.lower(): app_level = "Level-1 "
@@ -204,7 +300,7 @@ async def accept(interaction: discord.Interaction, message_link: str, applicant:
 async def reject(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
     await process_application(interaction, message_link, applicant, accepted=False, details=reason)
 
-# --- ANNOUNCEMENT & SSU COMMANDS ---
+# --- CORE BOT COMMANDS ---
 
 @bot.tree.command(name="ssu", description="Announce a Server Start Up (SSU).")
 @app_commands.checks.cooldown(1, 600, key=lambda i: i.guild_id)
@@ -219,85 +315,50 @@ async def ssu(interaction: discord.Interaction):
     await ssu_channel.send(content="@everyone", embed=embed, view=view)
     await interaction.response.send_message("SSU announcement has been sent!", ephemeral=True)
 
-@bot.tree.command(name="announce", description="Create a highly customizable server announcement.")
+@bot.tree.command(name="announce", description="Create a server announcement using a form.")
 @has_any_role(DD_AND_ABOVE_ROLES)
 @app_commands.choices(color=COLOR_CHOICES, ping_role=PING_CHOICES)
-async def announce(interaction: discord.Interaction, title: str, message: str, color: app_commands.Choice[str] = None, image_url: str = None, thumbnail_url: str = None, footer_text: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
-    announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-    if not announcement_channel: return await interaction.response.send_message("Error: Announcement channel not found.", ephemeral=True)
-    embed_color = get_discord_color(color.value if color else "default")
-    embed = discord.Embed(title=title, description=message.replace("\\n", "\n"), color=embed_color, timestamp=datetime.datetime.utcnow())
-    if image_url: embed.set_image(url=image_url)
-    if thumbnail_url: embed.set_thumbnail(url=thumbnail_url)
-    footer = footer_text if footer_text else f"Announcement by {interaction.user.display_name}"
-    embed.set_footer(text=footer)
-    buttons_data = []
-    if button1_text and button1_url: buttons_data.append({"label": button1_text, "url": button1_url})
-    if button2_text and button2_url: buttons_data.append({"label": button2_text, "url": button2_url})
-    view = create_button_view(buttons_data)
-    await announcement_channel.send(embed=embed, view=view)
-    await interaction.response.send_message("Announcement has been sent!", ephemeral=True)
-    if ping_role and ping_role.value != "none":
-        ping_value = ping_role.value
-        content = ping_value
-        if ping_value.isdigit(): content = f"<@&{ping_value}>"
-        await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
+@app_commands.describe(color="The color of the embed sidebar.", image_url="URL for a large image.", thumbnail_url="URL for a small top-right image.", footer_text="Custom footer text.", button1_text="Text for the first button.", button1_url="URL for the first button.", button2_text="Text for the second button.", button2_url="URL for the second button.", ping_role="Role to ping after sending.")
+async def announce(interaction: discord.Interaction, color: app_commands.Choice[str] = None, image_url: str = None, thumbnail_url: str = None, footer_text: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
+    modal_kwargs = {
+        'color': color.value if color else None, 'image_url': image_url, 'thumbnail_url': thumbnail_url,
+        'footer_text': footer_text, 'button1_text': button1_text, 'button1_url': button1_url,
+        'button2_text': button2_text, 'button2_url': button2_url,
+        'ping_role': ping_role.value if ping_role else None
+    }
+    await interaction.response.send_modal(AnnounceModal(**modal_kwargs))
 
-# --- RECRUITMENT POST MANAGEMENT COMMANDS ---
-
-@bot.tree.command(name="formattext", description="Formats multi-line text with '\\n' for use in other commands.")
-async def formattext(interaction: discord.Interaction):
-    await interaction.response.send_modal(FormatModal())
-
-@bot.tree.command(name="saverecruitmentpost", description="Saves a recruitment post template to the database.")
+@bot.tree.command(name="saverecruitmentpost", description="Saves a recruitment post using a form.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
-async def saverecruitmentpost(interaction: discord.Interaction, name: str, title: str, details: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
-    if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
-    name = name.lower().strip()
-    buttons = []
-    if button1_text and button1_url: buttons.append({"label": button1_text, "url": button1_url})
-    if button2_text and button2_url: buttons.append({"label": button2_text, "url": button2_url})
-    buttons_json = json.dumps(buttons)
-    ping_value = ping_role.value if ping_role and ping_role.value != "none" else None
-    color_value = color.value if color else "blue"
-    try:
-        async with bot.db_pool.acquire() as connection:
-            await connection.execute('''
-                INSERT INTO recruitment_posts (guild_id, name, title, details, image_url, buttons, ping_role, color) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (guild_id, name) DO UPDATE SET title = EXCLUDED.title, details = EXCLUDED.details, image_url = EXCLUDED.image_url, buttons = EXCLUDED.buttons, ping_role = EXCLUDED.ping_role, color = EXCLUDED.color;
-            ''', interaction.guild.id, name, title, details, image_url, buttons_json, ping_value, color_value)
-        await interaction.response.send_message(f"✅ Recruitment post saved/updated with the name: `{name}`", ephemeral=True)
-    except Exception as e:
-        print(f"Error saving post: {e}")
-        await interaction.response.send_message("An error occurred while saving the post.", ephemeral=True)
+@app_commands.describe(image_url="URL for an image.", button1_text="Text for the first button.", button1_url="URL for the first button.", button2_text="Text for the second button.", button2_url="URL for the second button.", ping_role="Role to save for pinging.", color="Color for the embed.")
+async def saverecruitmentpost(interaction: discord.Interaction, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
+    modal_kwargs = {
+        'image_url': image_url, 'button1_text': button1_text, 'button1_url': button1_url,
+        'button2_text': button2_text, 'button2_url': button2_url,
+        'ping_role': ping_role.value if ping_role else None,
+        'color': color.value if color else None
+    }
+    await interaction.response.send_modal(SaveRecruitmentModal(**modal_kwargs))
 
-@bot.tree.command(name="editrecruitmentpost", description="Edits an existing saved recruitment post.")
+@bot.tree.command(name="editrecruitmentpost", description="Edits a saved recruitment post using a form.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
 @app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
-async def editrecruitmentpost(interaction: discord.Interaction, name: str, title: str = None, details: str = None, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
+@app_commands.describe(name="The name of the post to edit.", image_url="New image URL.", button1_text="New text for button 1.", button1_url="New URL for button 1.", button2_text="New text for button 2.", button2_url="New URL for button 2.", ping_role="New ping role.", color="New embed color.")
+async def editrecruitmentpost(interaction: discord.Interaction, name: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
-        if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
-        new_title = title if title is not None else post_data['title']
-        new_details = details if details is not None else post_data['details']
-        new_image_url = image_url if image_url is not None else post_data['image_url']
-        buttons_list = json.loads(post_data.get("buttons", "[]"))
-        if button1_text is not None or button1_url is not None:
-             buttons_list[0] = {"label": button1_text or buttons_list[0]['label'], "url": button1_url or buttons_list[0]['url']}
-        if button2_text is not None or button2_url is not None:
-             buttons_list[1] = {"label": button2_text or buttons_list[1]['label'], "url": button2_url or buttons_list[1]['url']}
-        buttons_json = json.dumps(buttons_list)
-        new_ping_role = ping_role.value if ping_role else post_data['ping_role']
-        if ping_role and ping_role.value == "none": new_ping_role = None
-        new_color = color.value if color else post_data['color']
-        await connection.execute('''
-            UPDATE recruitment_posts SET title = $1, details = $2, image_url = $3, buttons = $4, ping_role = $5, color = $6
-            WHERE guild_id = $7 AND name = $8
-        ''', new_title, new_details, new_image_url, buttons_json, new_ping_role, new_color, interaction.guild.id, name.lower().strip())
-    await interaction.response.send_message(f"✅ Successfully edited recruitment post: `{name}`", ephemeral=True)
+    if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
+    
+    modal_kwargs = {
+        'image_url': image_url, 'button1_text': button1_text, 'button1_url': button1_url,
+        'button2_text': button2_text, 'button2_url': button2_url,
+        'ping_role': ping_role.value if ping_role else None,
+        'color': color.value if color else None
+    }
+    await interaction.response.send_modal(EditRecruitmentModal(name=name.lower().strip(), post_data=post_data, **modal_kwargs))
 
 @bot.tree.command(name="repost", description="Posts a saved recruitment announcement from the database.")
 @has_any_role(EP_AND_ABOVE_ROLES)
@@ -311,7 +372,7 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
     if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
     embed_color = get_discord_color(post_data.get("color") or "blue")
-    embed = discord.Embed(title=post_data["title"], description=post_data["details"].replace("\\n", "\n"), color=embed_color, timestamp=datetime.datetime.utcnow())
+    embed = discord.Embed(title=post_data["title"], description=post_data["details"], color=embed_color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text=f"Posted by {interaction.user.display_name}")
     if post_data.get("image_url"): embed.set_image(url=post_data["image_url"])
     buttons_list = json.loads(post_data.get("buttons", "[]"))
@@ -360,3 +421,4 @@ if __name__ == "__main__":
     if not BOT_TOKEN: print("Error: BOT_TOKEN is not set in the environment variables.")
     elif not DATABASE_URL: print("Error: DATABASE_URL is not set in the environment variables.")
     else: bot.run(BOT_TOKEN)
+
