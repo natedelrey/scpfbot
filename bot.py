@@ -77,6 +77,22 @@ def create_button_view(buttons_data):
         view.add_item(discord.ui.Button(label=button['label'], style=discord.ButtonStyle.link, url=button['url']))
     return view if view.children else None
 
+def format_timedelta(delta: datetime.timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0: return "less than a minute"
+
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    parts = []
+    if days: parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours: parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes: parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if seconds and not parts: parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+
+    return ", ".join(parts) if parts else "less than a minute"
+
 # --- DATABASE & BOT EVENTS ---
 async def setup_database():
     try:
@@ -86,8 +102,13 @@ async def setup_database():
                 CREATE TABLE IF NOT EXISTS recruitment_posts (
                     id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, name TEXT NOT NULL,
                     title TEXT NOT NULL, details TEXT NOT NULL, image_url TEXT,
-                    buttons JSONB, ping_role TEXT, color TEXT, UNIQUE(guild_id, name)
+                    buttons JSONB, ping_role TEXT, color TEXT, last_posted_at TIMESTAMPTZ,
+                    UNIQUE(guild_id, name)
                 );
+            ''')
+            await connection.execute('''
+                ALTER TABLE recruitment_posts
+                ADD COLUMN IF NOT EXISTS last_posted_at TIMESTAMPTZ;
             ''')
         print("Successfully connected to PostgreSQL and verified table.")
     except Exception as e:
@@ -368,9 +389,27 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     recruitment_channel = bot.get_channel(RECRUITMENT_CHANNEL_ID)
     if not recruitment_channel: return await interaction.response.send_message("Error: Recruitment channel not found.", ephemeral=True)
+
+    normalized_name = name.lower().strip()
     async with bot.db_pool.acquire() as connection:
-        post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
+        post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, normalized_name)
     if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    last_posted_at = post_data.get("last_posted_at")
+    if last_posted_at and last_posted_at.tzinfo is None:
+        last_posted_at = last_posted_at.replace(tzinfo=datetime.timezone.utc)
+    cooldown_duration = datetime.timedelta(days=7)
+    if last_posted_at:
+        time_since_post = now - last_posted_at
+        if time_since_post < cooldown_duration:
+            remaining = cooldown_duration - time_since_post
+            friendly_remaining = format_timedelta(remaining)
+            return await interaction.response.send_message(
+                f"This post is on cooldown for {friendly_remaining}, please wait until cooldown is over.",
+                ephemeral=True
+            )
+
     embed_color = get_discord_color(post_data.get("color") or "blue")
     embed = discord.Embed(title=post_data["title"], description=post_data["details"], color=embed_color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text=f"Posted by {interaction.user.display_name}")
@@ -379,6 +418,14 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
     view = create_button_view(buttons_list)
     await recruitment_channel.send(embed=embed, view=view)
     await interaction.response.send_message(f"Successfully reposted '{name}'!", ephemeral=True)
+    async with bot.db_pool.acquire() as connection:
+        await connection.execute(
+            'UPDATE recruitment_posts SET last_posted_at = $1 WHERE guild_id = $2 AND name = $3',
+            now,
+            interaction.guild.id,
+            normalized_name
+        )
+
     ping_value = None
     if ping_override:
         if ping_override.value != "none": ping_value = ping_override.value
