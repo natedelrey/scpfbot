@@ -399,8 +399,16 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
     last_posted_at = post_data.get("last_posted_at")
     if last_posted_at and last_posted_at.tzinfo is None:
         last_posted_at = last_posted_at.replace(tzinfo=datetime.timezone.utc)
+
+    post_text = " ".join(filter(None, [
+        post_data.get("title"),
+        post_data.get("details"),
+        normalized_name
+    ])).lower()
+    bypass_cooldown = "tryout" in post_text
+
     cooldown_duration = datetime.timedelta(days=7)
-    if last_posted_at:
+    if last_posted_at and not bypass_cooldown:
         time_since_post = now - last_posted_at
         if time_since_post < cooldown_duration:
             remaining = cooldown_duration - time_since_post
