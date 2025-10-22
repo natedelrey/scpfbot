@@ -309,16 +309,18 @@ async def process_application(interaction: discord.Interaction, message_link: st
     await results_channel.send(embed=embed)
     await interaction.response.send_message(f"Application for {applicant.mention} has been processed.", ephemeral=True)
 
-@bot.tree.command(name="accept", description="Accept a user's application.")
+applications_group = app_commands.Group(name="applications", description="Manage application results.")
+
+@applications_group.command(name="accept", description="Accept a user's application and log the result.")
 @has_any_role(NOTIFY_AND_APP_ROLES)
 @app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", reason="Optional reason for acceptance.")
-async def accept(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
+async def applications_accept(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
     await process_application(interaction, message_link, applicant, accepted=True, details=reason)
 
-@bot.tree.command(name="reject", description="Reject a user's application.")
+@applications_group.command(name="reject", description="Reject a user's application and log the result.")
 @has_any_role(NOTIFY_AND_APP_ROLES)
 @app_commands.describe(message_link="Link to the application message.", applicant="The user who applied.", reason="Optional reason for rejection.")
-async def reject(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
+async def applications_reject(interaction: discord.Interaction, message_link: str, applicant: discord.Member, reason: str = "Not provided."):
     await process_application(interaction, message_link, applicant, accepted=False, details=reason)
 
 # --- CORE BOT COMMANDS ---
@@ -349,11 +351,13 @@ async def announce(interaction: discord.Interaction, color: app_commands.Choice[
     }
     await interaction.response.send_modal(AnnounceModal(**modal_kwargs))
 
-@bot.tree.command(name="saverecruitmentpost", description="Saves a recruitment post using a form.")
+recruitment_group = app_commands.Group(name="recruitment", description="Manage recruitment posts and announcements.")
+
+@recruitment_group.command(name="save", description="Create or update a recruitment post using a form.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
 @app_commands.describe(image_url="URL for an image.", button1_text="Text for the first button.", button1_url="URL for the first button.", button2_text="Text for the second button.", button2_url="URL for the second button.", ping_role="Role to save for pinging.", color="Color for the embed.")
-async def saverecruitmentpost(interaction: discord.Interaction, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
+async def recruitment_save(interaction: discord.Interaction, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     modal_kwargs = {
         'image_url': image_url, 'button1_text': button1_text, 'button1_url': button1_url,
         'button2_text': button2_text, 'button2_url': button2_url,
@@ -362,17 +366,17 @@ async def saverecruitmentpost(interaction: discord.Interaction, image_url: str =
     }
     await interaction.response.send_modal(SaveRecruitmentModal(**modal_kwargs))
 
-@bot.tree.command(name="editrecruitmentpost", description="Edits a saved recruitment post using a form.")
+@recruitment_group.command(name="edit", description="Edit a saved recruitment post using a form.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
 @app_commands.choices(ping_role=PING_CHOICES, color=COLOR_CHOICES)
 @app_commands.describe(name="The name of the post to edit.", image_url="New image URL.", button1_text="New text for button 1.", button1_url="New URL for button 1.", button2_text="New text for button 2.", button2_url="New URL for button 2.", ping_role="New ping role.", color="New embed color.")
-async def editrecruitmentpost(interaction: discord.Interaction, name: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
+async def recruitment_edit(interaction: discord.Interaction, name: str, image_url: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None, color: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
     if not post_data: return await interaction.response.send_message(f"Error: No post found with the name '{name}'.", ephemeral=True)
-    
+
     modal_kwargs = {
         'image_url': image_url, 'button1_text': button1_text, 'button1_url': button1_url,
         'button2_text': button2_text, 'button2_url': button2_url,
@@ -381,11 +385,11 @@ async def editrecruitmentpost(interaction: discord.Interaction, name: str, image
     }
     await interaction.response.send_modal(EditRecruitmentModal(name=name.lower().strip(), post_data=post_data, **modal_kwargs))
 
-@bot.tree.command(name="repost", description="Posts a saved recruitment announcement from the database.")
+@recruitment_group.command(name="publish", description="Post a saved recruitment announcement from the database.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
 @app_commands.choices(ping_override=PING_CHOICES)
-async def repost(interaction: discord.Interaction, name: str, ping_override: app_commands.Choice[str] = None):
+async def recruitment_publish(interaction: discord.Interaction, name: str, ping_override: app_commands.Choice[str] = None):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     recruitment_channel = bot.get_channel(RECRUITMENT_CHANNEL_ID)
     if not recruitment_channel: return await interaction.response.send_message("Error: Recruitment channel not found.", ephemeral=True)
@@ -425,7 +429,7 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
     buttons_list = json.loads(post_data.get("buttons", "[]"))
     view = create_button_view(buttons_list)
     await recruitment_channel.send(embed=embed, view=view)
-    await interaction.response.send_message(f"Successfully reposted '{name}'!", ephemeral=True)
+    await interaction.response.send_message(f"Successfully published '{name}'!", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
         await connection.execute(
             'UPDATE recruitment_posts SET last_posted_at = $1 WHERE guild_id = $2 AND name = $3',
@@ -444,10 +448,10 @@ async def repost(interaction: discord.Interaction, name: str, ping_override: app
         if ping_value.isdigit(): content = f"<@&{ping_value}>"
         await recruitment_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
 
-@bot.tree.command(name="testrepost", description="Previews a saved recruitment announcement privately.")
+@recruitment_group.command(name="preview", description="Preview a saved recruitment announcement privately.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
-async def testrepost(interaction: discord.Interaction, name: str):
+async def recruitment_preview(interaction: discord.Interaction, name: str):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
         post_data = await connection.fetchrow('SELECT * FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
@@ -473,10 +477,10 @@ async def testrepost(interaction: discord.Interaction, name: str):
         
     await interaction.response.send_message(content=preview_text, embed=embed, view=view, ephemeral=True)
 
-@bot.tree.command(name="deleterecruitmentpost", description="Deletes a saved recruitment post.")
+@recruitment_group.command(name="delete", description="Delete a saved recruitment post.")
 @has_any_role(EP_AND_ABOVE_ROLES)
 @app_commands.autocomplete(name=post_autocomplete)
-async def deleterecruitmentpost(interaction: discord.Interaction, name: str):
+async def recruitment_delete(interaction: discord.Interaction, name: str):
     if not bot.db_pool: return await interaction.response.send_message("Error: Database is not connected.", ephemeral=True)
     async with bot.db_pool.acquire() as connection:
         result = await connection.execute('DELETE FROM recruitment_posts WHERE guild_id = $1 AND name = $2', interaction.guild.id, name.lower().strip())
@@ -484,6 +488,9 @@ async def deleterecruitmentpost(interaction: discord.Interaction, name: str):
         await interaction.response.send_message(f"✅ Successfully deleted recruitment post: `{name}`", ephemeral=True)
     else:
         await interaction.response.send_message(f"Error: No post found with the name '{name}' to delete.", ephemeral=True)
+
+bot.tree.add_command(applications_group)
+bot.tree.add_command(recruitment_group)
 
 # --- ERROR HANDLING ---
 @bot.tree.error
