@@ -77,6 +77,17 @@ def create_button_view(buttons_data):
         view.add_item(discord.ui.Button(label=button['label'], style=discord.ButtonStyle.link, url=button['url']))
     return view if view.children else None
 
+def extract_buttons_from_message(message: discord.Message):
+    buttons = []
+    for action_row in getattr(message, "components", []) or []:
+        for component in getattr(action_row, "children", []):
+            if getattr(component, "style", None) == discord.ButtonStyle.link:
+                label = getattr(component, "label", None)
+                url = getattr(component, "url", None)
+                if label and url:
+                    buttons.append({"label": label, "url": url})
+    return buttons
+
 def format_timedelta(delta: datetime.timedelta) -> str:
     total_seconds = int(delta.total_seconds())
     if total_seconds <= 0: return "less than a minute"
@@ -137,7 +148,7 @@ class AnnounceModal(discord.ui.Modal, title='Create Announcement'):
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
-    
+
     title_input = discord.ui.TextInput(label='Title', style=discord.TextStyle.short, required=True, max_length=256)
     message_input = discord.ui.TextInput(label='Message', style=discord.TextStyle.paragraph, required=True, max_length=4000)
 
@@ -169,6 +180,90 @@ class AnnounceModal(discord.ui.Modal, title='Create Announcement'):
             content = ping_role
             if ping_role.isdigit(): content = f"<@&{ping_role}>"
             await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
+
+class EditAnnouncementModal(discord.ui.Modal):
+    def __init__(self, message: discord.Message, original_embed: discord.Embed, **kwargs):
+        super().__init__(title='Edit Announcement')
+        self.message = message
+        self.original_embed = original_embed
+        self.kwargs = kwargs
+
+        default_title = original_embed.title or ""
+        default_description = original_embed.description or ""
+
+        self.title_input = discord.ui.TextInput(
+            label='Title', style=discord.TextStyle.short, required=True, max_length=256, default=default_title
+        )
+        self.message_input = discord.ui.TextInput(
+            label='Message', style=discord.TextStyle.paragraph, required=True, max_length=4000, default=default_description
+        )
+
+        self.add_item(self.title_input)
+        self.add_item(self.message_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        existing_color = self.original_embed.color or discord.Color.default()
+        embed_color = get_discord_color(self.kwargs.get('color')) if self.kwargs.get('color') else existing_color
+
+        new_embed = discord.Embed(
+            title=self.title_input.value,
+            description=self.message_input.value,
+            color=embed_color,
+            timestamp=datetime.datetime.utcnow()
+        )
+
+        existing_image_url = getattr(self.original_embed.image, 'url', None)
+        existing_thumbnail_url = getattr(self.original_embed.thumbnail, 'url', None)
+
+        if self.kwargs.get('remove_image'):
+            pass
+        elif self.kwargs.get('image_url'):
+            new_embed.set_image(url=self.kwargs['image_url'])
+        elif existing_image_url:
+            new_embed.set_image(url=existing_image_url)
+
+        if self.kwargs.get('remove_thumbnail'):
+            pass
+        elif self.kwargs.get('thumbnail_url'):
+            new_embed.set_thumbnail(url=self.kwargs['thumbnail_url'])
+        elif existing_thumbnail_url:
+            new_embed.set_thumbnail(url=existing_thumbnail_url)
+
+        footer_text = None
+        if self.kwargs.get('clear_footer'):
+            footer_text = None
+        elif self.kwargs.get('footer_text'):
+            footer_text = self.kwargs['footer_text']
+        else:
+            footer_text = getattr(self.original_embed.footer, 'text', None)
+
+        if footer_text:
+            new_embed.set_footer(text=footer_text)
+
+        buttons_list = list(self.kwargs.get('existing_buttons', []))
+        if self.kwargs.get('clear_buttons'):
+            buttons_list = []
+        else:
+            while len(buttons_list) < 2: buttons_list.append({})
+            if self.kwargs.get('button1_text') or self.kwargs.get('button1_url'):
+                buttons_list[0] = {
+                    "label": self.kwargs.get('button1_text') or buttons_list[0].get('label'),
+                    "url": self.kwargs.get('button1_url') or buttons_list[0].get('url')
+                }
+            if self.kwargs.get('button2_text') or self.kwargs.get('button2_url'):
+                buttons_list[1] = {
+                    "label": self.kwargs.get('button2_text') or buttons_list[1].get('label'),
+                    "url": self.kwargs.get('button2_url') or buttons_list[1].get('url')
+                }
+            buttons_list = [b for b in buttons_list if b.get('label') and b.get('url')]
+
+        view = create_button_view(buttons_list)
+
+        try:
+            await self.message.edit(embed=new_embed, view=view)
+            await interaction.response.send_message("Announcement has been updated!", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to edit the announcement: {e}", ephemeral=True)
 
 class SaveRecruitmentModal(discord.ui.Modal, title='Save Recruitment Post'):
     def __init__(self, **kwargs):
@@ -350,6 +445,90 @@ async def announce(interaction: discord.Interaction, color: app_commands.Choice[
         'ping_role': ping_role.value if ping_role else None
     }
     await interaction.response.send_modal(AnnounceModal(**modal_kwargs))
+
+@bot.tree.command(name="announce_edit", description="Edit an existing server announcement.")
+@has_any_role(DD_AND_ABOVE_ROLES)
+@app_commands.choices(color=COLOR_CHOICES)
+@app_commands.describe(
+    message_link="Link to the announcement message.",
+    color="New color for the embed.",
+    image_url="New image URL.",
+    thumbnail_url="New thumbnail URL.",
+    footer_text="New footer text.",
+    button1_text="Updated text for button 1.",
+    button1_url="Updated URL for button 1.",
+    button2_text="Updated text for button 2.",
+    button2_url="Updated URL for button 2.",
+    clear_buttons="Remove all buttons from the announcement.",
+    remove_image="Remove the embed image.",
+    remove_thumbnail="Remove the embed thumbnail.",
+    clear_footer="Remove the embed footer."
+)
+async def announce_edit(
+    interaction: discord.Interaction,
+    message_link: str,
+    color: app_commands.Choice[str] = None,
+    image_url: str = None,
+    thumbnail_url: str = None,
+    footer_text: str = None,
+    button1_text: str = None,
+    button1_url: str = None,
+    button2_text: str = None,
+    button2_url: str = None,
+    clear_buttons: bool = False,
+    remove_image: bool = False,
+    remove_thumbnail: bool = False,
+    clear_footer: bool = False,
+):
+    match = re.match(r"https://discord.com/channels/\d+/(\d+)/(\d+)", message_link)
+    if not match:
+        return await interaction.response.send_message("Invalid message link format.", ephemeral=True)
+
+    channel_id, message_id = map(int, match.groups())
+
+    if channel_id != ANNOUNCEMENT_CHANNEL_ID:
+        return await interaction.response.send_message("That message is not in the announcement channel.", ephemeral=True)
+
+    announcement_channel = bot.get_channel(channel_id)
+    if not announcement_channel:
+        try:
+            announcement_channel = await bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden):
+            announcement_channel = None
+    if not announcement_channel:
+        return await interaction.response.send_message("Announcement channel could not be found.", ephemeral=True)
+
+    try:
+        message = await announcement_channel.fetch_message(message_id)
+    except (discord.NotFound, discord.Forbidden):
+        return await interaction.response.send_message("Announcement message could not be found.", ephemeral=True)
+
+    if message.author != bot.user:
+        return await interaction.response.send_message("I can only edit announcements sent by me.", ephemeral=True)
+
+    if not message.embeds:
+        return await interaction.response.send_message("This message does not contain an embed to edit.", ephemeral=True)
+
+    original_embed = message.embeds[0]
+    existing_buttons = extract_buttons_from_message(message)
+
+    modal_kwargs = {
+        'color': color.value if color else None,
+        'image_url': image_url,
+        'thumbnail_url': thumbnail_url,
+        'footer_text': footer_text,
+        'button1_text': button1_text,
+        'button1_url': button1_url,
+        'button2_text': button2_text,
+        'button2_url': button2_url,
+        'clear_buttons': clear_buttons,
+        'remove_image': remove_image,
+        'remove_thumbnail': remove_thumbnail,
+        'clear_footer': clear_footer,
+        'existing_buttons': existing_buttons,
+    }
+
+    await interaction.response.send_modal(EditAnnouncementModal(message=message, original_embed=original_embed, **modal_kwargs))
 
 recruitment_group = app_commands.Group(name="recruitment", description="Manage recruitment posts and announcements.")
 
