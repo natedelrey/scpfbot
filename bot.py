@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 import os
 from dotenv import load_dotenv
 from typing import List
@@ -136,6 +136,8 @@ _roblox_csrf_token = None
 _group_roles_cache = None
 _group_roles_cache_time = 0.0
 _GROUP_ROLES_CACHE_SECONDS = 300  # 5 minutes
+_rank_cooldown_seconds = 15
+_rank_last_used = {}
 
 def roblox_request(method: str, url: str, json=None):
     """
@@ -216,6 +218,11 @@ def get_current_role_name(user_id: int) -> str:
         if g.get("group", {}).get("id") == ROBLOX_GROUP_ID:
             return g.get("role", {}).get("name", "Unknown")
     return "Not in group"
+
+def get_role_value(role_name: str) -> int | None:
+    if role_name in {"Unknown", "Not in group"}:
+        return 0
+    return ROBLOX_ROLE_VALUES.get(role_name)
 
 # --- BOT EVENTS ---
 @bot.event
@@ -535,6 +542,7 @@ async def announce_edit(
 # ===================== NEW: /RANK (WORKING) =====================
 @bot.tree.command(name="rank", description="Rank a Roblox user in the group (username or userId).")
 @has_any_role(list(DISCORD_RANK_LIMITS.keys()))
+@app_commands.checks.cooldown(10, 3600, key=lambda i: i.user.id)
 @app_commands.choices(rank=RANK_CHOICES)
 @app_commands.describe(
     target="Roblox username or userId",
@@ -544,13 +552,30 @@ async def announce_edit(
 async def rank(interaction: discord.Interaction, target: str, rank: app_commands.Choice[str], reason: str):
     log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
     max_allowed_value = get_max_allowed_rank_value(interaction.user)
+    now = time.time()
+    last_used = _rank_last_used.get(interaction.user.id, 0)
+    remaining_cooldown = _rank_cooldown_seconds - (now - last_used)
+    if remaining_cooldown > 0:
+        await interaction.response.send_message(
+            f"Please wait {int(remaining_cooldown)} more seconds before ranking again.",
+            ephemeral=True
+        )
+        return
+    _rank_last_used[interaction.user.id] = now
 
     try:
         user_id, username = resolve_roblox_user(target)
         old_role_name = get_current_role_name(user_id)
+        current_value = get_role_value(old_role_name)
 
         desired_role_name = rank.value
         desired_value = ROBLOX_ROLE_VALUES.get(desired_role_name)
+
+        if current_value is None:
+            raise ValueError("That user's current rank is not configured correctly.")
+
+        if current_value >= max_allowed_value:
+            raise PermissionError("You are not authorized to change the rank of a user with that rank.")
 
         if desired_value is None:
             raise ValueError("That rank choice is not configured correctly.")
@@ -583,7 +608,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         color=color,
         timestamp=datetime.now(UTC)
     )
-    embed.add_field(name="Staff", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Executive", value=interaction.user.mention, inline=False)
     embed.add_field(name="Target", value=username if 'username' in locals() else target, inline=False)
     embed.add_field(name="Old → New", value=f"{old_role_name if 'old_role_name' in locals() else 'Unknown'} → {rank.value}", inline=False)
     embed.add_field(name="Result", value=result, inline=False)
@@ -601,7 +626,7 @@ bot.tree.add_command(applications_group)
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
-        time_left = str(datetime.timedelta(seconds=int(error.retry_after)))  # fine for display
+        time_left = str(timedelta(seconds=int(error.retry_after)))  # fine for display
         await interaction.response.send_message(
             f"This command is on cooldown for everyone. Please try again in **{time_left}**.",
             ephemeral=True
