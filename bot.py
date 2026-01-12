@@ -30,7 +30,7 @@ ROBLOX_GROUP_ID = int(os.getenv("ROBLOX_GROUP_ID"))
 ROBLOX_HEADERS = {
     "Cookie": f".ROBLOSECURITY={ROBLOX_COOKIE}",
     "Content-Type": "application/json",
-    "User-Agent": "SCPFbot"
+    "User-Agent": "SCPFbot",
 }
 
 # ===================== DISCORD ROLES =====================
@@ -47,13 +47,12 @@ DD_AND_ABOVE_ROLES = [
 
 NOTIFY_AND_APP_ROLES = EP_AND_ABOVE_ROLES + ["1234517225206059019"]
 
-# Discord role → max Roblox roleId
 DISCORD_RANK_LIMITS = {
     "1233139781823627473": 5,   # Level 4 → Level 3
     "1246963191699734569": 6,   # Level 5 → Level 4
     "1233139781840670743": 7,   # O5 → Level 5
     "1233139781840670746": 9,   # O5 Head → O5 Council
-    "1233139781840670749": 255, # Administrator → unrestricted
+    "1233139781840670749": 255, # Administrator
 }
 
 # ===================== ROBLOX ROLE IDS =====================
@@ -88,6 +87,17 @@ def has_any_role(required_roles: List[str]):
             return False
         return any(str(r.id) in required_roles for r in interaction.user.roles)
     return app_commands.check(predicate)
+
+# ===================== ROBLOX REQUEST HANDLER =====================
+def roblox_request(method, url, json=None):
+    headers = ROBLOX_HEADERS.copy()
+    r = requests.request(method, url, headers=headers, json=json)
+
+    if r.status_code == 403 and "X-CSRF-TOKEN" in r.headers:
+        headers["X-CSRF-TOKEN"] = r.headers["X-CSRF-TOKEN"]
+        r = requests.request(method, url, headers=headers, json=json)
+
+    return r
 
 # ===================== HELPERS =====================
 def get_max_allowed_role(member: discord.Member) -> int:
@@ -142,14 +152,14 @@ async def rank(
 
     try:
         user_id, username = resolve_roblox_user(target)
-        old_role_name, old_role_id = get_current_role(user_id)
+        old_role_name, _ = get_current_role(user_id)
 
         if rank.value > max_allowed:
             raise PermissionError("You are not authorized to assign that rank.")
 
-        r = requests.patch(
+        r = roblox_request(
+            "PATCH",
             f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users/{user_id}",
-            headers=ROBLOX_HEADERS,
             json={"roleId": rank.value}
         )
 
