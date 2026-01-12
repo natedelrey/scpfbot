@@ -161,10 +161,7 @@ def roblox_request(method: str, url: str, json=None):
     return r
 
 def get_max_allowed_rank_value(member: discord.Member) -> int:
-    max_val = 0
-    for role in member.roles:
-        max_val = max(max_val, DISCORD_RANK_LIMITS.get(str(role.id), 0))
-    return max_val
+    return max((DISCORD_RANK_LIMITS.get(str(role.id), 0) for role in member.roles), default=0)
 
 def resolve_roblox_user(target: str):
     """
@@ -574,7 +571,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         if current_value is None:
             raise ValueError("That user's current rank is not configured correctly.")
 
-        if current_value >= max_allowed_value:
+        if current_value > max_allowed_value:
             raise PermissionError("You are not authorized to change the rank of a user with that rank.")
 
         if desired_value is None:
@@ -604,7 +601,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         response = f"❌ {e}"
 
     embed = discord.Embed(
-        title="Roblox Rank Log",
+        title="Rank Log",
         color=color,
         timestamp=datetime.now(UTC)
     )
