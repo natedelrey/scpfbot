@@ -571,7 +571,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         if current_value is None:
             raise ValueError("That user's current rank is not configured correctly.")
 
-        if current_value >= max_allowed_value:
+        if current_value > max_allowed_value:
             raise PermissionError("You are not authorized to change the rank of a user with that rank.")
 
         if desired_value is None:
