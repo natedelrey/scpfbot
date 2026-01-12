@@ -43,14 +43,6 @@ COLOR_CHOICES = [
     app_commands.Choice(name="Purple", value="purple"), app_commands.Choice(name="White", value="white"),
     app_commands.Choice(name="Black", value="black"),
 ]
-PING_CHOICES = [
-    app_commands.Choice(name="None", value="none"), app_commands.Choice(name="@here", value="@here"),
-    app_commands.Choice(name="@everyone", value="@everyone"), app_commands.Choice(name="Class-D", value="1233139781823627465"),
-    app_commands.Choice(name="Class-E", value="1233139781823627466"), app_commands.Choice(name="Foundation Personnel", value="1233139781823627469"),
-    app_commands.Choice(name="Executive Personnel", value="1233139781823627473"),
-    app_commands.Choice(name="Department Director", value="1246963191699734569"),
-    app_commands.Choice(name="Site Director", value="1233139781840670742"), app_commands.Choice(name="O5 Council", value="1233139781840670743"),
-]
 
 # --- PERMISSION CHECKS ---
 def has_any_role(required_roles: List[str]):
@@ -94,43 +86,6 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 # --- MODALS (FORMS) ---
-class AnnounceModal(discord.ui.Modal, title='Create Announcement'):
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.kwargs = kwargs
-
-    title_input = discord.ui.TextInput(label='Title', style=discord.TextStyle.short, required=True, max_length=256)
-    message_input = discord.ui.TextInput(label='Message', style=discord.TextStyle.paragraph, required=True, max_length=4000)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-        if not announcement_channel: return await interaction.response.send_message("Error: Announcement channel not found.", ephemeral=True)
-        
-        embed_color = get_discord_color(self.kwargs.get('color') or "default")
-        embed = discord.Embed(title=self.title_input.value, description=self.message_input.value, color=embed_color, timestamp=datetime.datetime.utcnow())
-        
-        if self.kwargs.get('image_url'): embed.set_image(url=self.kwargs['image_url'])
-        if self.kwargs.get('thumbnail_url'): embed.set_thumbnail(url=self.kwargs['thumbnail_url'])
-        
-        footer = self.kwargs.get('footer_text') or f"Announcement by {interaction.user.display_name}"
-        embed.set_footer(text=footer)
-        
-        buttons_data = []
-        if self.kwargs.get('button1_text') and self.kwargs.get('button1_url'):
-            buttons_data.append({"label": self.kwargs['button1_text'], "url": self.kwargs['button1_url']})
-        if self.kwargs.get('button2_text') and self.kwargs.get('button2_url'):
-            buttons_data.append({"label": self.kwargs['button2_text'], "url": self.kwargs['button2_url']})
-        
-        view = create_button_view(buttons_data)
-        await announcement_channel.send(embed=embed, view=view)
-        await interaction.response.send_message("Announcement has been sent!", ephemeral=True)
-
-        ping_role = self.kwargs.get('ping_role')
-        if ping_role and ping_role != "none":
-            content = ping_role
-            if ping_role.isdigit(): content = f"<@&{ping_role}>"
-            await announcement_channel.send(content, allowed_mentions=discord.AllowedMentions.all())
-
 class EditAnnouncementModal(discord.ui.Modal):
     def __init__(self, message: discord.Message, original_embed: discord.Embed, **kwargs):
         super().__init__(title='Edit Announcement')
@@ -282,7 +237,9 @@ async def process_application(interaction: discord.Interaction, message_link: st
     embed.add_field(name="Reason", value=details, inline=False)
     embed.set_footer(text=f"Processed by {interaction.user.display_name}")
 
-    await results_channel.send(embed=embed)
+    allowed_mentions = discord.AllowedMentions(users=[applicant]) if accepted else None
+    content = applicant.mention if accepted else None
+    await results_channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
     await interaction.response.send_message(f"Application for {applicant.mention} has been processed.", ephemeral=True)
 
 applications_group = app_commands.Group(name="applications", description="Manage application results.")
@@ -313,19 +270,6 @@ async def ssu(interaction: discord.Interaction):
     embed.set_footer(text=f"Hosted by {interaction.user.display_name}")
     await ssu_channel.send(content="@everyone", embed=embed, view=view)
     await interaction.response.send_message("SSU announcement has been sent!", ephemeral=True)
-
-@bot.tree.command(name="announce", description="Create a server announcement using a form.")
-@has_any_role(DD_AND_ABOVE_ROLES)
-@app_commands.choices(color=COLOR_CHOICES, ping_role=PING_CHOICES)
-@app_commands.describe(color="The color of the embed sidebar.", image_url="URL for a large image.", thumbnail_url="URL for a small top-right image.", footer_text="Custom footer text.", button1_text="Text for the first button.", button1_url="URL for the first button.", button2_text="Text for the second button.", button2_url="URL for the second button.", ping_role="Role to ping after sending.")
-async def announce(interaction: discord.Interaction, color: app_commands.Choice[str] = None, image_url: str = None, thumbnail_url: str = None, footer_text: str = None, button1_text: str = None, button1_url: str = None, button2_text: str = None, button2_url: str = None, ping_role: app_commands.Choice[str] = None):
-    modal_kwargs = {
-        'color': color.value if color else None, 'image_url': image_url, 'thumbnail_url': thumbnail_url,
-        'footer_text': footer_text, 'button1_text': button1_text, 'button1_url': button1_url,
-        'button2_text': button2_text, 'button2_url': button2_url,
-        'ping_role': ping_role.value if ping_role else None
-    }
-    await interaction.response.send_modal(AnnounceModal(**modal_kwargs))
 
 @bot.tree.command(name="announce_edit", description="Edit an existing server announcement.")
 @has_any_role(DD_AND_ABOVE_ROLES)
@@ -434,4 +378,3 @@ if __name__ == "__main__":
         print("Error: BOT_TOKEN is not set in the environment variables.")
     else:
         bot.run(BOT_TOKEN)
-
