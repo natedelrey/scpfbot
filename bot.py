@@ -4,6 +4,7 @@ from discord import app_commands
 from datetime import datetime, UTC, timedelta
 import os
 import json
+import textwrap
 from dotenv import load_dotenv
 from typing import List
 import re
@@ -680,6 +681,17 @@ def format_vote_list(user_ids: list[int]) -> str:
     return "\n".join(f"<@{uid}>" for uid in user_ids)
 
 
+def normalize_motion_content(content: str) -> str:
+    """
+    Preserve readable formatting from pasted text while removing accidental
+    slash-command/clipboard whitespace issues.
+    """
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = textwrap.dedent(normalized)
+    lines = [line.rstrip() for line in normalized.split("\n")]
+    return "\n".join(lines).strip()
+
+
 def build_motion_embed(motion: dict) -> discord.Embed:
     status_map = {
         "board_voting": "Board of Directors Voting",
@@ -700,7 +712,7 @@ def build_motion_embed(motion: dict) -> discord.Embed:
 
     embed = discord.Embed(
         title=f"Motion #{int(motion['motion_number']):03d} - {motion['title']}",
-        description=motion["content"],
+        description=normalize_motion_content(motion["content"]),
         color=color_map.get(motion["status"], discord.Color.blurple()),
         timestamp=datetime.now(UTC),
     )
@@ -921,21 +933,17 @@ class MotionVoteView(discord.ui.View):
         await process_vote(interaction, self.motion_id, self.stage, "abstain")
 
 
-motion_group = app_commands.Group(name="motion", description="Motion lifecycle and voting commands")
-
-
-@motion_group.command(name="create", description="Create a new motion and open Board voting.")
-@app_commands.describe(title="Motion title", content="Motion content/body")
-async def motion_create(interaction: discord.Interaction, title: str, content: str):
-    if not isinstance(interaction.user, discord.Member) or not member_has_any_role(
-        interaction.user, [BOARD_ROLE_ID, O5_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID]
-    ):
-        await interaction.response.send_message("You do not have permission to create motions.", ephemeral=True)
-        return
-
+async def create_motion_post(
+    interaction: discord.Interaction,
+    title: str,
+    content: str,
+):
     board_channel = await get_channel_by_id(BOARD_MOTIONS_CHANNEL_ID)
     if not board_channel:
-        await interaction.response.send_message("Board motions channel not found.", ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("Board motions channel not found.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Board motions channel not found.", ephemeral=True)
         return
 
     motion_number = int(motion_state["next_motion_number"])
@@ -943,7 +951,7 @@ async def motion_create(interaction: discord.Interaction, title: str, content: s
     motion = {
         "motion_number": motion_number,
         "title": title,
-        "content": content,
+        "content": normalize_motion_content(content),
         "proposer_id": interaction.user.id,
         "status": "board_voting",
         "created_at": datetime.now(UTC).isoformat(),
@@ -969,10 +977,55 @@ async def motion_create(interaction: discord.Interaction, title: str, content: s
     save_motion_state()
     schedule_motion_timer(motion_id)
 
-    await interaction.response.send_message(
-        f"Created motion **#{motion_number:03d}** and posted it in <#{BOARD_MOTIONS_CHANNEL_ID}>.",
-        ephemeral=True,
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            f"Created motion **#{motion_number:03d}** and posted it in <#{BOARD_MOTIONS_CHANNEL_ID}>.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            f"Created motion **#{motion_number:03d}** and posted it in <#{BOARD_MOTIONS_CHANNEL_ID}>.",
+            ephemeral=True,
+        )
+
+
+class MotionCreateModal(discord.ui.Modal, title="Create Motion"):
+    motion_content = discord.ui.TextInput(
+        label="Motion content",
+        style=discord.TextStyle.paragraph,
+        placeholder="Paste your full motion text here. Formatting/new lines are preserved.",
+        required=True,
+        max_length=4000,
     )
+
+    def __init__(self, motion_title: str):
+        super().__init__()
+        self.motion_title = motion_title
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await create_motion_post(interaction, self.motion_title, str(self.motion_content))
+
+
+motion_group = app_commands.Group(name="motion", description="Motion lifecycle and voting commands")
+
+
+@motion_group.command(name="create", description="Create a new motion and open Board voting.")
+@app_commands.describe(
+    title="Motion title",
+    content="Optional. If omitted, a popup opens for easier multi-line formatting.",
+)
+async def motion_create(interaction: discord.Interaction, title: str, content: str | None = None):
+    if not isinstance(interaction.user, discord.Member) or not member_has_any_role(
+        interaction.user, [BOARD_ROLE_ID, O5_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID]
+    ):
+        await interaction.response.send_message("You do not have permission to create motions.", ephemeral=True)
+        return
+
+    if content is None:
+        await interaction.response.send_modal(MotionCreateModal(motion_title=title))
+        return
+
+    await create_motion_post(interaction, title, content)
 
 
 @motion_group.command(name="pass", description="Manually pass a motion to next stage or final pass.")
