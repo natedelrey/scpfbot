@@ -667,6 +667,10 @@ def can_manage_motions(member: discord.Member) -> bool:
     return member_has_any_role(member, [COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID])
 
 
+def is_council_or_higher(member: discord.Member) -> bool:
+    return member_has_any_role(member, [O5_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID])
+
+
 def can_vote_stage(member: discord.Member, stage: str) -> bool:
     if stage == "board":
         return member_has_any_role(member, [BOARD_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID])
@@ -716,29 +720,40 @@ def build_motion_embed(motion: dict) -> discord.Embed:
         color=color_map.get(motion["status"], discord.Color.blurple()),
         timestamp=datetime.now(UTC),
     )
-    embed.add_field(name="Status", value=status_map.get(motion["status"], motion["status"]), inline=False)
-    embed.add_field(name="Proposed By", value=f"<@{motion['proposer_id']}>", inline=False)
+    embed.add_field(name="Status", value=f"**{status_map.get(motion['status'], motion['status'])}**", inline=True)
+    embed.add_field(name="Proposed By", value=f"<@{motion['proposer_id']}>", inline=True)
+    embed.add_field(name="Stage Flow", value="Board Review → O5 Council Decision", inline=False)
 
     board_votes = motion["board_votes"]
     o5_votes = motion["o5_votes"]
     embed.add_field(
-        name="Board Votes",
+        name="🗳️ Board Votes",
         value=(
-            f"✅ Approve:\n{format_vote_list(board_votes['approve'])}\n\n"
-            f"❌ Reject:\n{format_vote_list(board_votes['reject'])}\n\n"
-            f"➖ Abstain:\n{format_vote_list(board_votes['abstain'])}"
+            f"✅ **Approve ({len(board_votes['approve'])})**\n{format_vote_list(board_votes['approve'])}\n\n"
+            f"❌ **Reject ({len(board_votes['reject'])})**\n{format_vote_list(board_votes['reject'])}\n\n"
+            f"➖ **Abstain ({len(board_votes['abstain'])})**\n{format_vote_list(board_votes['abstain'])}"
         ),
         inline=False,
     )
-    embed.add_field(
-        name="O5 Votes",
-        value=(
-            f"✅ Approve:\n{format_vote_list(o5_votes['approve'])}\n\n"
-            f"❌ Reject:\n{format_vote_list(o5_votes['reject'])}\n\n"
-            f"➖ Abstain:\n{format_vote_list(o5_votes['abstain'])}"
-        ),
-        inline=False,
-    )
+
+    if motion["status"] == "board_voting":
+        embed.add_field(
+            name="🏛️ Council Stage",
+            value="Awaiting board outcome. O5 voting opens only after board approval.",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="🏛️ O5 Votes",
+            value=(
+                f"✅ **Approve ({len(o5_votes['approve'])})**\n{format_vote_list(o5_votes['approve'])}\n\n"
+                f"❌ **Reject ({len(o5_votes['reject'])})**\n{format_vote_list(o5_votes['reject'])}\n\n"
+                f"➖ **Abstain ({len(o5_votes['abstain'])})**\n{format_vote_list(o5_votes['abstain'])}"
+            ),
+            inline=False,
+        )
+
+    embed.set_footer(text="Vote buttons remain active only during the current stage.")
     return embed
 
 
@@ -801,7 +816,10 @@ async def move_motion_to_o5(motion_id: str, actor: discord.abc.User | None = Non
     o5_channel = await get_channel_by_id(O5_MOTIONS_CHANNEL_ID)
     if o5_channel:
         embed = build_motion_embed(motion)
-        content = f"Motion #{int(motion['motion_number']):03d} has passed Board and is now open for O5 voting."
+        content = (
+            f"✅ **Motion #{int(motion['motion_number']):03d} passed the Board.**\n"
+            "It has now been forwarded to the O5 Council and is awaiting their response."
+        )
         o5_msg = await o5_channel.send(content=content, embed=embed, view=MotionVoteView(motion_id, "o5"))
         motion["o5_channel_id"] = o5_channel.id
         motion["o5_message_id"] = o5_msg.id
@@ -938,12 +956,19 @@ async def create_motion_post(
     title: str,
     content: str,
 ):
-    board_channel = await get_channel_by_id(BOARD_MOTIONS_CHANNEL_ID)
-    if not board_channel:
+    proposer_is_council_plus = isinstance(interaction.user, discord.Member) and is_council_or_higher(interaction.user)
+
+    initial_status = "o5_voting" if proposer_is_council_plus else "board_voting"
+    target_channel_id = O5_MOTIONS_CHANNEL_ID if proposer_is_council_plus else BOARD_MOTIONS_CHANNEL_ID
+    target_channel_name = "O5 motions" if proposer_is_council_plus else "Board motions"
+
+    target_channel = await get_channel_by_id(target_channel_id)
+    if not target_channel:
+        error_message = f"{target_channel_name} channel not found."
         if interaction.response.is_done():
-            await interaction.followup.send("Board motions channel not found.", ephemeral=True)
+            await interaction.followup.send(error_message, ephemeral=True)
         else:
-            await interaction.response.send_message("Board motions channel not found.", ephemeral=True)
+            await interaction.response.send_message(error_message, ephemeral=True)
         return
 
     motion_number = int(motion_state["next_motion_number"])
@@ -953,25 +978,36 @@ async def create_motion_post(
         "title": title,
         "content": normalize_motion_content(content),
         "proposer_id": interaction.user.id,
-        "status": "board_voting",
+        "status": initial_status,
         "created_at": datetime.now(UTC).isoformat(),
-        "board_deadline": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+        "board_deadline": (datetime.now(UTC) + timedelta(hours=24)).isoformat() if initial_status == "board_voting" else None,
         "board_channel_id": BOARD_MOTIONS_CHANNEL_ID,
         "board_message_id": None,
-        "o5_channel_id": None,
+        "o5_started_at": datetime.now(UTC).isoformat() if initial_status == "o5_voting" else None,
+        "o5_deadline": (datetime.now(UTC) + timedelta(hours=24)).isoformat() if initial_status == "o5_voting" else None,
+        "o5_channel_id": O5_MOTIONS_CHANNEL_ID if initial_status == "o5_voting" else None,
         "o5_message_id": None,
         "board_votes": {"approve": [], "reject": [], "abstain": []},
         "o5_votes": {"approve": [], "reject": [], "abstain": []},
     }
 
     embed = build_motion_embed(motion)
-    motion_msg = await board_channel.send(
-        content=f"New motion #{motion_number:03d} opened for Board voting.",
-        embed=embed,
-        view=MotionVoteView(motion_id, "board"),
+    opening_message = (
+        f"New motion #{motion_number:03d} opened for Board voting."
+        if initial_status == "board_voting"
+        else f"New motion #{motion_number:03d} opened directly for O5 Council voting (council+ proposal)."
     )
 
-    motion["board_message_id"] = motion_msg.id
+    motion_msg = await target_channel.send(
+        content=opening_message,
+        embed=embed,
+        view=MotionVoteView(motion_id, "o5" if initial_status == "o5_voting" else "board"),
+    )
+
+    if initial_status == "board_voting":
+        motion["board_message_id"] = motion_msg.id
+    else:
+        motion["o5_message_id"] = motion_msg.id
     motion_state["motions"][motion_id] = motion
     motion_state["next_motion_number"] = motion_number + 1
     save_motion_state()
@@ -979,12 +1015,12 @@ async def create_motion_post(
 
     if interaction.response.is_done():
         await interaction.followup.send(
-            f"Created motion **#{motion_number:03d}** and posted it in <#{BOARD_MOTIONS_CHANNEL_ID}>.",
+            f"Created motion **#{motion_number:03d}** and posted it in <#{target_channel_id}>.",
             ephemeral=True,
         )
     else:
         await interaction.response.send_message(
-            f"Created motion **#{motion_number:03d}** and posted it in <#{BOARD_MOTIONS_CHANNEL_ID}>.",
+            f"Created motion **#{motion_number:03d}** and posted it in <#{target_channel_id}>.",
             ephemeral=True,
         )
 
@@ -1009,7 +1045,7 @@ class MotionCreateModal(discord.ui.Modal, title="Create Motion"):
 motion_group = app_commands.Group(name="motion", description="Motion lifecycle and voting commands")
 
 
-@motion_group.command(name="create", description="Create a new motion and open Board voting.")
+@motion_group.command(name="create", description="Create a new motion for Board review (or direct O5 if council+ proposer).")
 @app_commands.describe(
     title="Motion title",
     content="Optional. If omitted, a popup opens for easier multi-line formatting.",
