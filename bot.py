@@ -3,11 +3,13 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, UTC, timedelta
 import os
+import json
 from dotenv import load_dotenv
 from typing import List
 import re
 import requests
 import time
+import asyncio
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -24,6 +26,19 @@ except (TypeError, ValueError):
     exit()
 
 GAME_LINK = os.getenv("GAME_LINK", "https://www.roblox.com/games/17371095768/SCP-Lambda")
+
+# --- MOTION SYSTEM CONFIG (HARDCODED AS REQUESTED) ---
+BOARD_ROLE_ID = 1246963191699734569
+O5_ROLE_ID = 1233139781840670743
+COUNCIL_CHAIRMAN_ROLE_ID = 1233139781840670746
+ADMINISTRATOR_ROLE_ID = 1233139781840670749
+
+BOARD_MOTIONS_CHANNEL_ID = 1471329253093150885
+O5_MOTIONS_CHANNEL_ID = 1471329476003627038
+BULLETIN_CHANNEL_ID = 1233139781857317013
+
+MOTION_STATE_FILE = "motions_state.json"
+MOTION_VOTE_OPTIONS = ("approve", "reject", "abstain")
 
 # --- ROBLOX CONFIG ---
 ROBLOX_COOKIE = os.getenv("ROBLOX_COOKIE")
@@ -225,6 +240,8 @@ def get_role_value(role_name: str) -> int | None:
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
+    load_motion_state()
+    restore_motion_timers()
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
@@ -616,8 +633,428 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
 
     await interaction.response.send_message(response, ephemeral=True)
 
+
+
+# ===================== MOTION SYSTEM =====================
+motion_state = {"next_motion_number": 1, "motions": {}}
+motion_timer_tasks: dict[str, asyncio.Task] = {}
+
+
+def save_motion_state():
+    with open(MOTION_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(motion_state, f, indent=2)
+
+
+def load_motion_state():
+    global motion_state
+    if os.path.exists(MOTION_STATE_FILE):
+        with open(MOTION_STATE_FILE, "r", encoding="utf-8") as f:
+            motion_state = json.load(f)
+    else:
+        save_motion_state()
+
+    motion_state.setdefault("next_motion_number", 1)
+    motion_state.setdefault("motions", {})
+
+
+def member_has_any_role(member: discord.Member, role_ids: list[int]) -> bool:
+    member_role_ids = {r.id for r in member.roles}
+    return any(role_id in member_role_ids for role_id in role_ids)
+
+
+def can_manage_motions(member: discord.Member) -> bool:
+    return member_has_any_role(member, [COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID])
+
+
+def can_vote_stage(member: discord.Member, stage: str) -> bool:
+    if stage == "board":
+        return member_has_any_role(member, [BOARD_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID])
+    if stage == "o5":
+        return member_has_any_role(member, [O5_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID])
+    return False
+
+
+def format_vote_list(user_ids: list[int]) -> str:
+    if not user_ids:
+        return "None"
+    return "\n".join(f"<@{uid}>" for uid in user_ids)
+
+
+def build_motion_embed(motion: dict) -> discord.Embed:
+    status_map = {
+        "board_voting": "Board of Directors Voting",
+        "o5_voting": "O5 Council Voting",
+        "passed": "Passed",
+        "failed_board": "Failed at Board",
+        "failed_o5": "Failed at O5 Council",
+        "vetoed": "Vetoed",
+    }
+    color_map = {
+        "board_voting": discord.Color.gold(),
+        "o5_voting": discord.Color.orange(),
+        "passed": discord.Color.green(),
+        "failed_board": discord.Color.red(),
+        "failed_o5": discord.Color.red(),
+        "vetoed": discord.Color.dark_red(),
+    }
+
+    embed = discord.Embed(
+        title=f"Motion #{int(motion['motion_number']):03d} - {motion['title']}",
+        description=motion["content"],
+        color=color_map.get(motion["status"], discord.Color.blurple()),
+        timestamp=datetime.now(UTC),
+    )
+    embed.add_field(name="Status", value=status_map.get(motion["status"], motion["status"]), inline=False)
+    embed.add_field(name="Proposed By", value=f"<@{motion['proposer_id']}>", inline=False)
+
+    board_votes = motion["board_votes"]
+    o5_votes = motion["o5_votes"]
+    embed.add_field(
+        name="Board Votes",
+        value=(
+            f"✅ Approve:\n{format_vote_list(board_votes['approve'])}\n\n"
+            f"❌ Reject:\n{format_vote_list(board_votes['reject'])}\n\n"
+            f"➖ Abstain:\n{format_vote_list(board_votes['abstain'])}"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="O5 Votes",
+        value=(
+            f"✅ Approve:\n{format_vote_list(o5_votes['approve'])}\n\n"
+            f"❌ Reject:\n{format_vote_list(o5_votes['reject'])}\n\n"
+            f"➖ Abstain:\n{format_vote_list(o5_votes['abstain'])}"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def get_channel_by_id(channel_id: int):
+    channel = bot.get_channel(channel_id)
+    if channel:
+        return channel
+    try:
+        return await bot.fetch_channel(channel_id)
+    except (discord.NotFound, discord.Forbidden):
+        return None
+
+
+async def update_motion_messages(motion_id: str):
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        return
+
+    embed = build_motion_embed(motion)
+
+    board_channel = await get_channel_by_id(motion["board_channel_id"])
+    if board_channel and motion.get("board_message_id"):
+        try:
+            board_msg = await board_channel.fetch_message(motion["board_message_id"])
+            board_view = MotionVoteView(motion_id, "board") if motion["status"] == "board_voting" else None
+            await board_msg.edit(embed=embed, view=board_view)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+    if motion.get("o5_message_id") and motion.get("o5_channel_id"):
+        o5_channel = await get_channel_by_id(motion["o5_channel_id"])
+        if o5_channel:
+            try:
+                o5_msg = await o5_channel.fetch_message(motion["o5_message_id"])
+                o5_view = MotionVoteView(motion_id, "o5") if motion["status"] == "o5_voting" else None
+                await o5_msg.edit(embed=embed, view=o5_view)
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+
+async def send_bulletin_update(motion: dict, headline: str):
+    bulletin_channel = await get_channel_by_id(BULLETIN_CHANNEL_ID)
+    if not bulletin_channel:
+        return
+
+    embed = build_motion_embed(motion)
+    embed.title = f"{headline} - Motion #{int(motion['motion_number']):03d}"
+    await bulletin_channel.send(embed=embed)
+
+
+async def move_motion_to_o5(motion_id: str, actor: discord.abc.User | None = None):
+    motion = motion_state["motions"].get(motion_id)
+    if not motion or motion["status"] != "board_voting":
+        return
+
+    motion["status"] = "o5_voting"
+    motion["o5_started_at"] = datetime.now(UTC).isoformat()
+    motion["o5_deadline"] = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+
+    o5_channel = await get_channel_by_id(O5_MOTIONS_CHANNEL_ID)
+    if o5_channel:
+        embed = build_motion_embed(motion)
+        content = f"Motion #{int(motion['motion_number']):03d} has passed Board and is now open for O5 voting."
+        o5_msg = await o5_channel.send(content=content, embed=embed, view=MotionVoteView(motion_id, "o5"))
+        motion["o5_channel_id"] = o5_channel.id
+        motion["o5_message_id"] = o5_msg.id
+
+    save_motion_state()
+    await update_motion_messages(motion_id)
+    await send_bulletin_update(motion, "Motion advanced to O5 Council")
+    schedule_motion_timer(motion_id)
+
+
+async def finalize_motion(motion_id: str, result: str, actor: discord.abc.User | None = None):
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        return
+
+    motion["status"] = result
+    motion["finalized_at"] = datetime.now(UTC).isoformat()
+    if actor:
+        motion["finalized_by"] = actor.id
+
+    save_motion_state()
+    await update_motion_messages(motion_id)
+
+    if result == "passed":
+        await send_bulletin_update(motion, "Motion passed")
+    elif result == "failed_board":
+        await send_bulletin_update(motion, "Motion failed at Board")
+    elif result == "failed_o5":
+        await send_bulletin_update(motion, "Motion failed at O5 Council")
+    elif result == "vetoed":
+        await send_bulletin_update(motion, "Motion vetoed")
+
+    task = motion_timer_tasks.pop(motion_id, None)
+    if task:
+        task.cancel()
+
+
+async def handle_motion_timeout(motion_id: str):
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        return
+
+    now = datetime.now(UTC)
+    deadline_key = "board_deadline" if motion["status"] == "board_voting" else "o5_deadline"
+    deadline = datetime.fromisoformat(motion[deadline_key])
+    wait_seconds = max((deadline - now).total_seconds(), 0)
+    await asyncio.sleep(wait_seconds)
+
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        return
+
+    if motion["status"] == "board_voting":
+        board_votes = motion["board_votes"]
+        if len(board_votes["approve"]) > len(board_votes["reject"]):
+            await move_motion_to_o5(motion_id)
+        else:
+            await finalize_motion(motion_id, "failed_board")
+    elif motion["status"] == "o5_voting":
+        o5_votes = motion["o5_votes"]
+        if len(o5_votes["approve"]) > len(o5_votes["reject"]):
+            await finalize_motion(motion_id, "passed")
+        else:
+            await finalize_motion(motion_id, "failed_o5")
+
+
+def schedule_motion_timer(motion_id: str):
+    task = motion_timer_tasks.get(motion_id)
+    if task and not task.done():
+        task.cancel()
+
+    motion = motion_state["motions"].get(motion_id)
+    if not motion or motion["status"] not in {"board_voting", "o5_voting"}:
+        return
+
+    motion_timer_tasks[motion_id] = asyncio.create_task(handle_motion_timeout(motion_id))
+
+
+def restore_motion_timers():
+    for motion_id, motion in motion_state["motions"].items():
+        if motion["status"] in {"board_voting", "o5_voting"}:
+            schedule_motion_timer(motion_id)
+
+
+async def process_vote(interaction: discord.Interaction, motion_id: str, stage: str, vote_type: str):
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        await interaction.response.send_message("Motion data not found.", ephemeral=True)
+        return
+
+    expected_status = "board_voting" if stage == "board" else "o5_voting"
+    if motion["status"] != expected_status:
+        await interaction.response.send_message("That voting stage is no longer active.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member) or not can_vote_stage(interaction.user, stage):
+        await interaction.response.send_message("You do not have permission to vote in this stage.", ephemeral=True)
+        return
+
+    stage_votes = motion["board_votes"] if stage == "board" else motion["o5_votes"]
+
+    user_id = interaction.user.id
+    for vote_option in MOTION_VOTE_OPTIONS:
+        if user_id in stage_votes[vote_option]:
+            stage_votes[vote_option].remove(user_id)
+    stage_votes[vote_type].append(user_id)
+
+    save_motion_state()
+    await update_motion_messages(motion_id)
+    await interaction.response.send_message(f"Vote recorded: **{vote_type}**.", ephemeral=True)
+
+
+class MotionVoteView(discord.ui.View):
+    def __init__(self, motion_id: str, stage: str):
+        super().__init__(timeout=None)
+        self.motion_id = motion_id
+        self.stage = stage
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await process_vote(interaction, self.motion_id, self.stage, "approve")
+
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
+    async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await process_vote(interaction, self.motion_id, self.stage, "reject")
+
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.secondary)
+    async def abstain_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await process_vote(interaction, self.motion_id, self.stage, "abstain")
+
+
+motion_group = app_commands.Group(name="motion", description="Motion lifecycle and voting commands")
+
+
+@motion_group.command(name="create", description="Create a new motion and open Board voting.")
+@app_commands.describe(title="Motion title", content="Motion content/body")
+async def motion_create(interaction: discord.Interaction, title: str, content: str):
+    if not isinstance(interaction.user, discord.Member) or not member_has_any_role(
+        interaction.user, [BOARD_ROLE_ID, O5_ROLE_ID, COUNCIL_CHAIRMAN_ROLE_ID, ADMINISTRATOR_ROLE_ID]
+    ):
+        await interaction.response.send_message("You do not have permission to create motions.", ephemeral=True)
+        return
+
+    board_channel = await get_channel_by_id(BOARD_MOTIONS_CHANNEL_ID)
+    if not board_channel:
+        await interaction.response.send_message("Board motions channel not found.", ephemeral=True)
+        return
+
+    motion_number = int(motion_state["next_motion_number"])
+    motion_id = str(motion_number)
+    motion = {
+        "motion_number": motion_number,
+        "title": title,
+        "content": content,
+        "proposer_id": interaction.user.id,
+        "status": "board_voting",
+        "created_at": datetime.now(UTC).isoformat(),
+        "board_deadline": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+        "board_channel_id": BOARD_MOTIONS_CHANNEL_ID,
+        "board_message_id": None,
+        "o5_channel_id": None,
+        "o5_message_id": None,
+        "board_votes": {"approve": [], "reject": [], "abstain": []},
+        "o5_votes": {"approve": [], "reject": [], "abstain": []},
+    }
+
+    embed = build_motion_embed(motion)
+    motion_msg = await board_channel.send(
+        content=f"New motion #{motion_number:03d} opened for Board voting.",
+        embed=embed,
+        view=MotionVoteView(motion_id, "board"),
+    )
+
+    motion["board_message_id"] = motion_msg.id
+    motion_state["motions"][motion_id] = motion
+    motion_state["next_motion_number"] = motion_number + 1
+    save_motion_state()
+    schedule_motion_timer(motion_id)
+
+    await interaction.response.send_message(
+        f"Created motion **#{motion_number:03d}** and posted it in <#{BOARD_MOTIONS_CHANNEL_ID}>.",
+        ephemeral=True,
+    )
+
+
+@motion_group.command(name="pass", description="Manually pass a motion to next stage or final pass.")
+@app_commands.describe(motion_number="Motion number (e.g. 1 for #001)")
+async def motion_pass(interaction: discord.Interaction, motion_number: int):
+    if not isinstance(interaction.user, discord.Member) or not can_manage_motions(interaction.user):
+        await interaction.response.send_message("You do not have permission to pass motions.", ephemeral=True)
+        return
+
+    motion_id = str(motion_number)
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        await interaction.response.send_message("Motion not found.", ephemeral=True)
+        return
+
+    if motion["status"] == "board_voting":
+        await move_motion_to_o5(motion_id, interaction.user)
+        await interaction.response.send_message("Motion passed Board and moved to O5 voting.", ephemeral=True)
+    elif motion["status"] == "o5_voting":
+        await finalize_motion(motion_id, "passed", interaction.user)
+        await interaction.response.send_message("Motion marked as passed.", ephemeral=True)
+    else:
+        await interaction.response.send_message("This motion is already finalized.", ephemeral=True)
+
+
+@motion_group.command(name="reject", description="Manually reject a motion in its current stage.")
+@app_commands.describe(motion_number="Motion number (e.g. 1 for #001)")
+async def motion_reject(interaction: discord.Interaction, motion_number: int):
+    if not isinstance(interaction.user, discord.Member) or not can_manage_motions(interaction.user):
+        await interaction.response.send_message("You do not have permission to reject motions.", ephemeral=True)
+        return
+
+    motion_id = str(motion_number)
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        await interaction.response.send_message("Motion not found.", ephemeral=True)
+        return
+
+    if motion["status"] == "board_voting":
+        await finalize_motion(motion_id, "failed_board", interaction.user)
+        await interaction.response.send_message("Motion rejected at Board stage.", ephemeral=True)
+    elif motion["status"] == "o5_voting":
+        await finalize_motion(motion_id, "failed_o5", interaction.user)
+        await interaction.response.send_message("Motion rejected at O5 stage.", ephemeral=True)
+    else:
+        await interaction.response.send_message("This motion is already finalized.", ephemeral=True)
+
+
+@motion_group.command(name="veto", description="Veto a motion and stop it immediately.")
+@app_commands.describe(motion_number="Motion number (e.g. 1 for #001)")
+async def motion_veto(interaction: discord.Interaction, motion_number: int):
+    if not isinstance(interaction.user, discord.Member) or not can_manage_motions(interaction.user):
+        await interaction.response.send_message("You do not have permission to veto motions.", ephemeral=True)
+        return
+
+    motion_id = str(motion_number)
+    motion = motion_state["motions"].get(motion_id)
+    if not motion:
+        await interaction.response.send_message("Motion not found.", ephemeral=True)
+        return
+
+    if motion["status"] in {"passed", "failed_board", "failed_o5", "vetoed"}:
+        await interaction.response.send_message("This motion is already finalized.", ephemeral=True)
+        return
+
+    await finalize_motion(motion_id, "vetoed", interaction.user)
+    await interaction.response.send_message("Motion vetoed.", ephemeral=True)
+
+
+@motion_group.command(name="status", description="View motion status and vote breakdown.")
+@app_commands.describe(motion_number="Motion number (e.g. 1 for #001)")
+async def motion_status(interaction: discord.Interaction, motion_number: int):
+    motion = motion_state["motions"].get(str(motion_number))
+    if not motion:
+        await interaction.response.send_message("Motion not found.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(embed=build_motion_embed(motion), ephemeral=True)
+
 # --- REGISTER GROUP COMMANDS ---
 bot.tree.add_command(applications_group)
+bot.tree.add_command(motion_group)
 
 # --- ERROR HANDLING ---
 @bot.tree.error
