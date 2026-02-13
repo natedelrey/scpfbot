@@ -641,6 +641,24 @@ motion_state = {"next_motion_number": 1, "motions": {}}
 motion_timer_tasks: dict[str, asyncio.Task] = {}
 
 
+def _motion_vote_snapshot(motion: dict) -> dict:
+    return {
+        "board": {option: list(motion["board_votes"][option]) for option in MOTION_VOTE_OPTIONS},
+        "o5": {option: list(motion["o5_votes"][option]) for option in MOTION_VOTE_OPTIONS},
+    }
+
+
+def append_motion_audit_entry(motion: dict, action: str, actor_id: int | None = None, extra: dict | None = None):
+    entry = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "action": action,
+        "actor_id": actor_id,
+    }
+    if extra:
+        entry.update(extra)
+    motion.setdefault("audit_log", []).append(entry)
+
+
 def save_motion_state():
     with open(MOTION_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(motion_state, f, indent=2)
@@ -656,6 +674,16 @@ def load_motion_state():
 
     motion_state.setdefault("next_motion_number", 1)
     motion_state.setdefault("motions", {})
+
+    max_motion_number = 0
+    for motion_id, motion in motion_state["motions"].items():
+        try:
+            max_motion_number = max(max_motion_number, int(motion.get("motion_number", int(motion_id))))
+        except (TypeError, ValueError):
+            continue
+        motion.setdefault("audit_log", [])
+
+    motion_state["next_motion_number"] = max(motion_state["next_motion_number"], max_motion_number + 1)
 
 
 def member_has_any_role(member: discord.Member, role_ids: list[int]) -> bool:
@@ -813,6 +841,13 @@ async def move_motion_to_o5(motion_id: str, actor: discord.abc.User | None = Non
     motion["o5_started_at"] = datetime.now(UTC).isoformat()
     motion["o5_deadline"] = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
 
+    append_motion_audit_entry(
+        motion,
+        action="advanced_to_o5",
+        actor_id=actor.id if actor else None,
+        extra={"votes": _motion_vote_snapshot(motion)},
+    )
+
     o5_channel = await get_channel_by_id(O5_MOTIONS_CHANNEL_ID)
     if o5_channel:
         embed = build_motion_embed(motion)
@@ -839,6 +874,13 @@ async def finalize_motion(motion_id: str, result: str, actor: discord.abc.User |
     motion["finalized_at"] = datetime.now(UTC).isoformat()
     if actor:
         motion["finalized_by"] = actor.id
+
+    append_motion_audit_entry(
+        motion,
+        action="finalized",
+        actor_id=actor.id if actor else None,
+        extra={"result": result, "votes": _motion_vote_snapshot(motion)},
+    )
 
     save_motion_state()
     await update_motion_messages(motion_id)
@@ -927,6 +969,13 @@ async def process_vote(interaction: discord.Interaction, motion_id: str, stage: 
             stage_votes[vote_option].remove(user_id)
     stage_votes[vote_type].append(user_id)
 
+    append_motion_audit_entry(
+        motion,
+        action="vote_cast",
+        actor_id=user_id,
+        extra={"stage": stage, "vote": vote_type},
+    )
+
     save_motion_state()
     await update_motion_messages(motion_id)
     await interaction.response.send_message(f"Vote recorded: **{vote_type}**.", ephemeral=True)
@@ -989,7 +1038,15 @@ async def create_motion_post(
         "o5_message_id": None,
         "board_votes": {"approve": [], "reject": [], "abstain": []},
         "o5_votes": {"approve": [], "reject": [], "abstain": []},
+        "audit_log": [],
     }
+
+    append_motion_audit_entry(
+        motion,
+        action="created",
+        actor_id=interaction.user.id,
+        extra={"proposer_id": interaction.user.id, "initial_status": initial_status},
+    )
 
     embed = build_motion_embed(motion)
     opening_message = (
