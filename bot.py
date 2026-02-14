@@ -703,10 +703,12 @@ def can_vote_stage(member: discord.Member, stage: str) -> bool:
     return False
 
 
-def format_vote_list(user_ids: list[int]) -> str:
-    if not user_ids:
-        return "None"
-    return "\n".join(f"<@{uid}>" for uid in user_ids)
+def format_vote_block(label: str, emoji: str, user_ids: list[int]) -> str:
+    if user_ids:
+        voters = "\n".join(f"• <@{uid}>" for uid in user_ids)
+    else:
+        voters = "• None"
+    return f"▎{emoji} **{label} ({len(user_ids)})**\n{voters}"
 
 
 def normalize_motion_content(content: str) -> str:
@@ -724,7 +726,7 @@ def build_motion_embed(motion: dict) -> discord.Embed:
     status_map = {
         "board_voting": "Board of Directors Voting",
         "o5_voting": "O5 Council Voting",
-        "passed": "Passed",
+        "passed": "PASSED",
         "failed_board": "Failed at Board",
         "failed_o5": "Failed at O5 Council",
         "vetoed": "Vetoed",
@@ -738,44 +740,68 @@ def build_motion_embed(motion: dict) -> discord.Embed:
         "vetoed": discord.Color.dark_red(),
     }
 
+    status_text = status_map.get(motion["status"], motion["status"])
+    description = (
+        f"`{status_text}`\n\n"
+        f"{normalize_motion_content(motion['content'])}"
+    )
+
     embed = discord.Embed(
-        title=f"Motion #{int(motion['motion_number']):03d} - {motion['title']}",
-        description=normalize_motion_content(motion["content"]),
+        title=f"Motion #{int(motion['motion_number']):03d} || {motion['title']}",
+        description=description,
         color=color_map.get(motion["status"], discord.Color.blurple()),
         timestamp=datetime.now(UTC),
     )
-    embed.add_field(name="Status", value=f"**{status_map.get(motion['status'], motion['status'])}**", inline=True)
-    embed.add_field(name="Proposed By", value=f"<@{motion['proposer_id']}>", inline=True)
-    embed.add_field(name="Stage Flow", value="Board Review → O5 Council Decision", inline=False)
+    current_stage = "Board of Directors" if motion["status"] == "board_voting" else "Overseer Council"
+    embed.add_field(name="📩 Proposed by", value=f"<@{motion['proposer_id']}>", inline=True)
+    embed.add_field(name="🚩 Stage", value=current_stage, inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=False)
 
     board_votes = motion["board_votes"]
     o5_votes = motion["o5_votes"]
+
+    board_summary = "\n\n".join([
+        format_vote_block("Approvals", "✅", board_votes["approve"]),
+        format_vote_block("Rejections", "❌", board_votes["reject"]),
+        format_vote_block("Abstentions", "🟧", board_votes["abstain"]),
+    ])
+
+    if motion["status"] == "board_voting":
+        board_summary += "\n\n**Awaiting Board decision.**"
+    elif motion["status"] == "passed":
+        board_summary += "\n\nPassed **Board of Directors**."
+    else:
+        board_summary += "\n\nBoard stage complete."
+
     embed.add_field(
-        name="🗳️ Board Votes",
-        value=(
-            f"✅ **Approve ({len(board_votes['approve'])})**\n{format_vote_list(board_votes['approve'])}\n\n"
-            f"❌ **Reject ({len(board_votes['reject'])})**\n{format_vote_list(board_votes['reject'])}\n\n"
-            f"➖ **Abstain ({len(board_votes['abstain'])})**\n{format_vote_list(board_votes['abstain'])}"
-        ),
-        inline=False,
+        name="Board of Directors Vote",
+        value=board_summary,
+        inline=True,
     )
 
     if motion["status"] == "board_voting":
-        embed.add_field(
-            name="🏛️ Council Stage",
-            value="Awaiting board outcome. O5 voting opens only after board approval.",
-            inline=False,
-        )
+        o5_summary = "Overseer Council vote opens after Board approval."
     else:
-        embed.add_field(
-            name="🏛️ O5 Votes",
-            value=(
-                f"✅ **Approve ({len(o5_votes['approve'])})**\n{format_vote_list(o5_votes['approve'])}\n\n"
-                f"❌ **Reject ({len(o5_votes['reject'])})**\n{format_vote_list(o5_votes['reject'])}\n\n"
-                f"➖ **Abstain ({len(o5_votes['abstain'])})**\n{format_vote_list(o5_votes['abstain'])}"
-            ),
-            inline=False,
-        )
+        o5_summary = "\n\n".join([
+            format_vote_block("Approvals", "✅", o5_votes["approve"]),
+            format_vote_block("Rejections", "❌", o5_votes["reject"]),
+            format_vote_block("Abstentions", "🟧", o5_votes["abstain"]),
+        ])
+
+        if motion["status"] == "o5_voting":
+            o5_summary += "\n\nAwaiting **Overseer Council** decision."
+        elif motion["status"] == "passed":
+            o5_summary += "\n\nPassed **Council**."
+        elif motion["status"] in {"failed_o5", "vetoed"}:
+            o5_summary += "\n\nFailed at **Council** stage."
+        else:
+            o5_summary += "\n\nCouncil stage closed."
+
+    embed.add_field(
+        name="Overseer Council Vote",
+        value=o5_summary,
+        inline=True,
+    )
 
     embed.set_footer(text="Vote buttons remain active only during the current stage.")
     return embed
