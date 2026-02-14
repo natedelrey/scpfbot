@@ -36,7 +36,7 @@ ADMINISTRATOR_ROLE_ID = 1233139781840670749
 
 BOARD_MOTIONS_CHANNEL_ID = 1471329253093150885
 O5_MOTIONS_CHANNEL_ID = 1471329476003627038
-BULLETIN_CHANNEL_ID = 1233139781857317013
+MOTION_UPDATES_CHANNEL_ID = 1471960962805403648
 
 MOTION_STATE_FILE = "motions_state.json"
 MOTION_VOTE_OPTIONS = ("approve", "reject", "abstain")
@@ -827,7 +827,8 @@ def build_motion_embed(motion: dict) -> discord.Embed:
         inline=True,
     )
 
-    embed.set_footer(text="Vote buttons remain active only during the current stage.")
+    if motion["status"] in {"board_voting", "o5_voting"}:
+        embed.set_footer(text="Vote buttons remain active only during the current stage.")
     return embed
 
 
@@ -868,14 +869,36 @@ async def update_motion_messages(motion_id: str):
                 pass
 
 
+def build_motion_update_embed(motion: dict, headline: str) -> discord.Embed:
+    embed = build_motion_embed(motion)
+    embed.title = f"Motion {int(motion['motion_number']):03d}"
+    embed.description = (
+        f"**{motion['title']}**\n"
+        f"`{headline}`\n\n"
+        f"{normalize_motion_content(motion['content'])}"
+    )
+    return embed
+
+
 async def send_bulletin_update(motion: dict, headline: str):
-    bulletin_channel = await get_channel_by_id(BULLETIN_CHANNEL_ID)
-    if not bulletin_channel:
+    updates_channel = await get_channel_by_id(MOTION_UPDATES_CHANNEL_ID)
+    if not updates_channel:
         return
 
-    embed = build_motion_embed(motion)
-    embed.title = f"{headline} - Motion #{int(motion['motion_number']):03d}"
-    await bulletin_channel.send(embed=embed)
+    embed = build_motion_update_embed(motion, headline)
+
+    existing_message_id = motion.get("updates_message_id")
+    if existing_message_id:
+        try:
+            existing_message = await updates_channel.fetch_message(existing_message_id)
+            await existing_message.edit(embed=embed)
+            return
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+    sent_message = await updates_channel.send(embed=embed)
+    motion["updates_message_id"] = sent_message.id
+    save_motion_state()
 
 
 async def move_motion_to_o5(motion_id: str, actor: discord.abc.User | None = None):
