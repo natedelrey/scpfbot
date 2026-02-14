@@ -41,6 +41,21 @@ BULLETIN_CHANNEL_ID = 1233139781857317013
 MOTION_STATE_FILE = "motions_state.json"
 MOTION_VOTE_OPTIONS = ("approve", "reject", "abstain")
 
+MOTION_EMOJIS = {
+    "approve": {
+        "text": "<:checkmark:1471958216744374354>",
+        "button": discord.PartialEmoji(name="checkmark", id=1471958216744374354),
+    },
+    "reject": {
+        "text": "<:cross~1:1471957648088895488>",
+        "button": discord.PartialEmoji(name="cross~1", id=1471957648088895488),
+    },
+    "abstain": {
+        "text": "<:neutral:1471957837944197303>",
+        "button": discord.PartialEmoji(name="neutral", id=1471957837944197303),
+    },
+}
+
 # --- ROBLOX CONFIG ---
 ROBLOX_COOKIE = os.getenv("ROBLOX_COOKIE")
 ROBLOX_HEADERS_BASE = {
@@ -722,6 +737,15 @@ def normalize_motion_content(content: str) -> str:
     return "\n".join(lines).strip()
 
 
+def get_motion_stage_ping(stage: str) -> str:
+    stage_role_map = {
+        "board": BOARD_ROLE_ID,
+        "o5": O5_ROLE_ID,
+    }
+    role_id = stage_role_map.get(stage)
+    return f"<@&{role_id}>" if role_id else ""
+
+
 def build_motion_embed(motion: dict) -> discord.Embed:
     status_map = {
         "board_voting": "Board of Directors Voting",
@@ -761,9 +785,9 @@ def build_motion_embed(motion: dict) -> discord.Embed:
     o5_votes = motion["o5_votes"]
 
     board_summary = "\n\n".join([
-        format_vote_block("Approvals", "✅", board_votes["approve"]),
-        format_vote_block("Rejections", "❌", board_votes["reject"]),
-        format_vote_block("Abstentions", "🟧", board_votes["abstain"]),
+        format_vote_block("Approvals", MOTION_EMOJIS["approve"]["text"], board_votes["approve"]),
+        format_vote_block("Rejections", MOTION_EMOJIS["reject"]["text"], board_votes["reject"]),
+        format_vote_block("Abstentions", MOTION_EMOJIS["abstain"]["text"], board_votes["abstain"]),
     ])
 
     if motion["status"] == "board_voting":
@@ -783,9 +807,9 @@ def build_motion_embed(motion: dict) -> discord.Embed:
         o5_summary = "Overseer Council vote opens after Board approval."
     else:
         o5_summary = "\n\n".join([
-            format_vote_block("Approvals", "✅", o5_votes["approve"]),
-            format_vote_block("Rejections", "❌", o5_votes["reject"]),
-            format_vote_block("Abstentions", "🟧", o5_votes["abstain"]),
+            format_vote_block("Approvals", MOTION_EMOJIS["approve"]["text"], o5_votes["approve"]),
+            format_vote_block("Rejections", MOTION_EMOJIS["reject"]["text"], o5_votes["reject"]),
+            format_vote_block("Abstentions", MOTION_EMOJIS["abstain"]["text"], o5_votes["abstain"]),
         ])
 
         if motion["status"] == "o5_voting":
@@ -873,10 +897,7 @@ async def move_motion_to_o5(motion_id: str, actor: discord.abc.User | None = Non
     o5_channel = await get_channel_by_id(O5_MOTIONS_CHANNEL_ID)
     if o5_channel:
         embed = build_motion_embed(motion)
-        content = (
-            f"✅ **Motion #{int(motion['motion_number']):03d} passed the Board.**\n"
-            "It has now been forwarded to the O5 Council and is awaiting their response."
-        )
+        content = get_motion_stage_ping("o5")
         o5_msg = await o5_channel.send(content=content, embed=embed, view=MotionVoteView(motion_id, "o5"))
         motion["o5_channel_id"] = o5_channel.id
         motion["o5_message_id"] = o5_msg.id
@@ -1009,15 +1030,15 @@ class MotionVoteView(discord.ui.View):
         self.motion_id = motion_id
         self.stage = stage
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji=MOTION_EMOJIS["approve"]["button"])
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await process_vote(interaction, self.motion_id, self.stage, "approve")
 
-    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji=MOTION_EMOJIS["reject"]["button"])
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await process_vote(interaction, self.motion_id, self.stage, "reject")
 
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.secondary, emoji=MOTION_EMOJIS["abstain"]["button"])
     async def abstain_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await process_vote(interaction, self.motion_id, self.stage, "abstain")
 
@@ -1069,7 +1090,7 @@ async def create_motion_post(
     )
 
     embed = build_motion_embed(motion)
-    opening_message = f"New motion #{motion_number:03d} opened for Board voting."
+    opening_message = get_motion_stage_ping("board")
 
     motion_msg = await target_channel.send(
         content=opening_message,
