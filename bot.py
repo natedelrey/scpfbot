@@ -19,7 +19,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 try:
     ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID"))
     SSU_CHANNEL_ID = int(os.getenv("SSU_CHANNEL_ID"))
-    APPLICATION_RESULTS_CHANNEL_ID = int(os.getenv("APPLICATION_RESULTS_CHANNEL_ID"))
+    APPLICATION_RESULTS_CHANNEL_ID = int(os.getenv("APPLICATION_RESULTS_CHANNEL_ID", "1471960884997001227"))
     RANK_LOG_CHANNEL_ID = int(os.getenv("RANK_LOG_CHANNEL_ID"))
     ROBLOX_GROUP_ID = int(os.getenv("ROBLOX_GROUP_ID"))
 except (TypeError, ValueError):
@@ -47,8 +47,8 @@ MOTION_EMOJIS = {
         "button": discord.PartialEmoji(name="checkmark", id=1471958216744374354),
     },
     "reject": {
-        "text": "<:cross~1:1471957648088895488>",
-        "button": discord.PartialEmoji(name="cross~1", id=1471957648088895488),
+        "text": "<:cross:1471957648088895488>",
+        "button": discord.PartialEmoji(name="cross", id=1471957648088895488),
     },
     "abstain": {
         "text": "<:neutral:1471957837944197303>",
