@@ -41,6 +41,7 @@ O5_MOTIONS_CHANNEL_ID = 1471329476003627038
 MOTION_UPDATES_CHANNEL_ID = 1471960962805403648
 
 MOTION_STATE_FILE = "motions_state.json"
+MOTION_STATE_DB_KEY = "motion_state"
 MOTION_VOTE_OPTIONS = ("approve", "reject", "abstain")
 
 MOTION_EMOJIS = {
@@ -259,6 +260,7 @@ def get_role_value(role_name: str) -> int | None:
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
     load_motion_state()
+    register_motion_views()
     restore_motion_timers()
     try:
         synced = await bot.tree.sync()
@@ -699,6 +701,64 @@ def initialize_motion_counter_table(seed_value: int):
         motion_state["next_motion_number"] = int(row[0])
 
 
+def _save_motion_state_to_database():
+    if not DATABASE_URL:
+        return
+
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_value JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO bot_state (state_key, state_value, updated_at)
+                VALUES (%s, %s::jsonb, NOW())
+                ON CONFLICT (state_key)
+                DO UPDATE SET
+                    state_value = EXCLUDED.state_value,
+                    updated_at = NOW()
+                """,
+                (MOTION_STATE_DB_KEY, json.dumps(motion_state)),
+            )
+
+
+def _load_motion_state_from_database() -> dict | None:
+    if not DATABASE_URL:
+        return None
+
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_value JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "SELECT state_value FROM bot_state WHERE state_key = %s",
+                (MOTION_STATE_DB_KEY,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    payload = row[0]
+    if isinstance(payload, str):
+        return json.loads(payload)
+    return payload
+
+
 def reserve_motion_number() -> int:
     if not DATABASE_URL:
         motion_number = int(motion_state["next_motion_number"])
@@ -748,14 +808,32 @@ def save_motion_state():
     with open(MOTION_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(motion_state, f, indent=2)
 
+    if DATABASE_URL:
+        try:
+            _save_motion_state_to_database()
+        except Exception as e:
+            print(f"Warning: failed to save motion state to database. Error: {e}")
+
 
 def load_motion_state():
     global motion_state
-    if os.path.exists(MOTION_STATE_FILE):
-        with open(MOTION_STATE_FILE, "r", encoding="utf-8") as f:
-            motion_state = json.load(f)
-    else:
-        save_motion_state()
+    loaded_from_db = False
+
+    if DATABASE_URL:
+        try:
+            db_state = _load_motion_state_from_database()
+            if db_state:
+                motion_state = db_state
+                loaded_from_db = True
+        except Exception as e:
+            print(f"Warning: failed to load motion state from database. Falling back to file. Error: {e}")
+
+    if not loaded_from_db:
+        if os.path.exists(MOTION_STATE_FILE):
+            with open(MOTION_STATE_FILE, "r", encoding="utf-8") as f:
+                motion_state = json.load(f)
+        else:
+            save_motion_state()
 
     motion_state.setdefault("next_motion_number", 1)
     motion_state.setdefault("motions", {})
@@ -774,6 +852,8 @@ def load_motion_state():
         initialize_motion_counter_table(motion_state["next_motion_number"])
     except Exception as e:
         print(f"Warning: motion counter DB sync failed, falling back to file counter. Error: {e}")
+
+    save_motion_state()
 
 
 def member_has_any_role(member: discord.Member, role_ids: list[int]) -> bool:
@@ -1087,6 +1167,15 @@ def restore_motion_timers():
             schedule_motion_timer(motion_id)
 
 
+def register_motion_views():
+    for motion_id, motion in motion_state["motions"].items():
+        status = motion.get("status")
+        if status == "board_voting" and motion.get("board_message_id"):
+            bot.add_view(MotionVoteView(motion_id, "board"), message_id=motion["board_message_id"])
+        if status == "o5_voting" and motion.get("o5_message_id"):
+            bot.add_view(MotionVoteView(motion_id, "o5"), message_id=motion["o5_message_id"])
+
+
 async def process_vote(interaction: discord.Interaction, motion_id: str, stage: str, vote_type: str):
     motion = motion_state["motions"].get(motion_id)
     if not motion:
@@ -1127,6 +1216,10 @@ class MotionVoteView(discord.ui.View):
         super().__init__(timeout=None)
         self.motion_id = motion_id
         self.stage = stage
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                vote_name = (child.label or "vote").lower()
+                child.custom_id = f"motion:{motion_id}:{stage}:{vote_name}"
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji=MOTION_EMOJIS["approve"]["button"])
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
