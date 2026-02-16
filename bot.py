@@ -11,6 +11,7 @@ import re
 import requests
 import time
 import asyncio
+import psycopg2
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -27,6 +28,7 @@ except (TypeError, ValueError):
     exit()
 
 GAME_LINK = os.getenv("GAME_LINK", "https://www.roblox.com/games/17371095768/SCP-Lambda")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- MOTION SYSTEM CONFIG (HARDCODED AS REQUESTED) ---
 BOARD_ROLE_ID = 1246963191699734569
@@ -656,6 +658,74 @@ motion_state = {"next_motion_number": 1, "motions": {}}
 motion_timer_tasks: dict[str, asyncio.Task] = {}
 
 
+def initialize_motion_counter_table(seed_value: int):
+    if not DATABASE_URL:
+        return
+
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_counters (
+                    counter_key TEXT PRIMARY KEY,
+                    counter_value BIGINT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO bot_counters (counter_key, counter_value)
+                VALUES (%s, %s)
+                ON CONFLICT (counter_key) DO NOTHING
+                """,
+                ("motion_number", seed_value),
+            )
+            cur.execute(
+                """
+                UPDATE bot_counters
+                SET counter_value = %s
+                WHERE counter_key = %s
+                  AND counter_value < %s
+                """,
+                (seed_value, "motion_number", seed_value),
+            )
+            cur.execute(
+                "SELECT counter_value FROM bot_counters WHERE counter_key = %s",
+                ("motion_number",),
+            )
+            row = cur.fetchone()
+
+    if row:
+        motion_state["next_motion_number"] = int(row[0])
+
+
+def reserve_motion_number() -> int:
+    if not DATABASE_URL:
+        motion_number = int(motion_state["next_motion_number"])
+        motion_state["next_motion_number"] = motion_number + 1
+        return motion_number
+
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bot_counters
+                SET counter_value = counter_value + 1
+                WHERE counter_key = %s
+                RETURNING counter_value - 1
+                """,
+                ("motion_number",),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise RuntimeError("Failed to reserve next motion number from database.")
+
+    motion_number = int(row[0])
+    motion_state["next_motion_number"] = motion_number + 1
+    return motion_number
+
+
 def _motion_vote_snapshot(motion: dict) -> dict:
     return {
         "board": {option: list(motion["board_votes"][option]) for option in MOTION_VOTE_OPTIONS},
@@ -699,6 +769,11 @@ def load_motion_state():
         motion.setdefault("audit_log", [])
 
     motion_state["next_motion_number"] = max(motion_state["next_motion_number"], max_motion_number + 1)
+
+    try:
+        initialize_motion_counter_table(motion_state["next_motion_number"])
+    except Exception as e:
+        print(f"Warning: motion counter DB sync failed, falling back to file counter. Error: {e}")
 
 
 def member_has_any_role(member: discord.Member, role_ids: list[int]) -> bool:
@@ -1084,7 +1159,7 @@ async def create_motion_post(
             await interaction.response.send_message(error_message, ephemeral=True)
         return
 
-    motion_number = int(motion_state["next_motion_number"])
+    motion_number = reserve_motion_number()
     motion_id = str(motion_number)
     motion = {
         "motion_number": motion_number,
@@ -1123,7 +1198,6 @@ async def create_motion_post(
 
     motion["board_message_id"] = motion_msg.id
     motion_state["motions"][motion_id] = motion
-    motion_state["next_motion_number"] = motion_number + 1
     save_motion_state()
     schedule_motion_timer(motion_id)
 
