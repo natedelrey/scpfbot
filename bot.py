@@ -486,7 +486,7 @@ async def ssu(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"Hosted by {interaction.user.display_name}")
 
-    await ssu_channel.send(content="@everyone", embed=embed, view=view)
+    await ssu_channel.send(content="@here", embed=embed, view=view)
     await interaction.response.send_message("SSU announcement has been sent!", ephemeral=True)
 
 @bot.tree.command(name="announce_edit", description="Edit an existing server announcement.")
