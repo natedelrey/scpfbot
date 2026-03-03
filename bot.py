@@ -39,6 +39,7 @@ ADMINISTRATOR_ROLE_ID = 1233139781840670749
 BOARD_MOTIONS_CHANNEL_ID = 1471329253093150885
 O5_MOTIONS_CHANNEL_ID = 1471329476003627038
 MOTION_UPDATES_CHANNEL_ID = 1471960962805403648
+SSU_PING_ROLE_ID = 1478171080261763094
 
 MOTION_STATE_FILE = "motions_state.json"
 MOTION_STATE_DB_KEY = "motion_state"
@@ -486,7 +487,12 @@ async def ssu(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"Hosted by {interaction.user.display_name}")
 
-    await ssu_channel.send(content="@here", embed=embed, view=view)
+    await ssu_channel.send(
+        content=f"<@&{SSU_PING_ROLE_ID}>",
+        embed=embed,
+        view=view,
+        allowed_mentions=discord.AllowedMentions(roles=True),
+    )
     await interaction.response.send_message("SSU announcement has been sent!", ephemeral=True)
 
 @bot.tree.command(name="announce_edit", description="Edit an existing server announcement.")
