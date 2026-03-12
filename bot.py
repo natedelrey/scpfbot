@@ -149,15 +149,15 @@ def extract_buttons_from_message(message: discord.Message):
 # ===================== ROBLOX HELPERS (WORKING VERSION) =====================
 # These are your "rank values" (hierarchy), NOT Roblox role IDs.
 ROBLOX_ROLE_VALUES = {
-    "Class - D": 1,
-    "Class - E": 2,
-    "Level - 1": 3,
-    "Level - 2": 4,
-    "Level - 3": 5,
-    "Level - 4": 6,
-    "Level - 5": 7,
-    "O5 Council": 9,
-    "O5 Head": 10,
+    "Class D": 1,
+    "Class E": 2,
+    "Level 1": 3,
+    "Level 2": 4,
+    "Level 3": 5,
+    "Level 4": 6,
+    "Level 5": 7,
+    "Overseer Council": 9,
+    "Council Chairman": 10,
     "The Administrator": 11,
     "Group Holder": 255,
 }
@@ -242,8 +242,10 @@ def get_group_roles():
     return roles
 
 def get_role_id_by_name(role_name: str) -> int:
+    normalized_role_name = re.sub(r"[^a-z0-9]", "", role_name.lower())
     for role in get_group_roles():
-        if role.get("name", "").strip().lower() == role_name.strip().lower():
+        normalized_group_role_name = re.sub(r"[^a-z0-9]", "", role.get("name", "").lower())
+        if normalized_group_role_name == normalized_role_name:
             return int(role["id"])
     raise ValueError("That role does not exist in the Roblox group.")
 
