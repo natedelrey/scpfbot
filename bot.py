@@ -162,6 +162,11 @@ ROBLOX_ROLE_VALUES = {
     "Group Holder": 255,
 }
 
+NORMALIZED_ROBLOX_ROLE_VALUES = {
+    re.sub(r"[^a-z0-9]", "", name.lower()): value
+    for name, value in ROBLOX_ROLE_VALUES.items()
+}
+
 RANK_CHOICES = [
     app_commands.Choice(name=f"{name} (Value {val})", value=name)
     for name, val in ROBLOX_ROLE_VALUES.items()
@@ -254,7 +259,18 @@ def get_current_role_name(user_id: int) -> str:
 def get_role_value(role_name: str) -> int | None:
     if role_name in {"Unknown", "Not in group"}:
         return 0
-    return ROBLOX_ROLE_VALUES.get(role_name)
+
+    normalized_role_name = re.sub(r"[^a-z0-9]", "", role_name.lower())
+
+    configured_value = NORMALIZED_ROBLOX_ROLE_VALUES.get(normalized_role_name)
+    if configured_value is not None:
+        return configured_value
+
+    for role in get_group_roles():
+        if re.sub(r"[^a-z0-9]", "", role.get("name", "").lower()) == normalized_role_name:
+            return int(role.get("rank", 0))
+
+    return None
 
 # --- BOT EVENTS ---
 @bot.event
@@ -604,6 +620,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
     _rank_last_used[interaction.user.id] = now
 
     try:
+        error_message = None
         user_id, username = resolve_roblox_user(target)
         old_role_name = get_current_role_name(user_id)
         current_value = get_role_value(old_role_name)
@@ -641,7 +658,8 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
     except Exception as e:
         result = "❌ Failed"
         color = discord.Color.red()
-        response = f"❌ {e}"
+        error_message = str(e)
+        response = f"❌ {error_message}"
 
     embed = discord.Embed(
         title="Rank Log",
@@ -653,6 +671,8 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
     embed.add_field(name="Old → New", value=f"{old_role_name if 'old_role_name' in locals() else 'Unknown'} → {rank.value}", inline=False)
     embed.add_field(name="Result", value=result, inline=False)
     embed.add_field(name="Reason", value=reason, inline=False)
+    if error_message:
+        embed.add_field(name="Error", value=textwrap.shorten(error_message, width=1024, placeholder="…"), inline=False)
 
     if log_channel:
         await log_channel.send(embed=embed)
