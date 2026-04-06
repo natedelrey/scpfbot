@@ -31,7 +31,9 @@ GAME_LINK = os.getenv("GAME_LINK", "https://www.roblox.com/games/17371095768/SCP
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- MOTION SYSTEM CONFIG (HARDCODED AS REQUESTED) ---
-BOARD_ROLE_ID = 1246963191699734569
+LEVEL_4_ROLE_ID = 1233139781823627473
+LEVEL_3_ROLE_ID = 1233152664163057754
+BOARD_ROLE_ID = LEVEL_4_ROLE_ID
 O5_ROLE_ID = 1233139781840670743
 COUNCIL_CHAIRMAN_ROLE_ID = 1233139781840670746
 ADMINISTRATOR_ROLE_ID = 1233139781840670749
@@ -70,9 +72,10 @@ ROBLOX_HEADERS_BASE = {
 
 # --- ROLE IDs FOR PERMISSIONS ---
 EP_AND_ABOVE_ROLES = [
-    "1233139781823627473", "1246963191699734569", "1233139781840670742",
+    "1233139781823627473", "1233139781840670742",
     "1233139781840670743", "1233139781840670746"
 ]
+SSU_ALLOWED_ROLES = [LEVEL_3_ROLE_ID, *EP_AND_ABOVE_ROLES]
 DD_AND_ABOVE_ROLES = [
     "1246963191699734569", "1233139781840670742", "1233139781840670743",
     "1233139781840670746"
@@ -83,7 +86,6 @@ NOTIFY_AND_APP_ROLES = EP_AND_ABOVE_ROLES + ["1234517225206059019"]
 # (These are your hierarchy values, NOT Roblox role IDs.)
 DISCORD_RANK_LIMITS = {
     "1233139781823627473": 5,    # Level-4 Discord -> max Level-3 Roblox (value 5)
-    "1246963191699734569": 6,    # Level-5 Discord -> max Level-4 Roblox (value 6)
     "1233139781840670743": 7,    # O5 Discord -> max Level-5 Roblox (value 7)
     "1233139781840670746": 9,    # O5 Head Discord -> max O5 Council Roblox (value 9)
     "1233139781840670749": 999,  # Administrator Discord -> unrestricted
@@ -155,7 +157,6 @@ ROBLOX_ROLE_VALUES = {
     "Level 2": 4,
     "Level 3": 5,
     "Level 4": 6,
-    "Level 5": 7,
     "Overseer Council": 9,
     "Council Chairman": 10,
     "The Administrator": 11,
@@ -257,6 +258,23 @@ def get_current_role_name(user_id: int) -> str:
         if g.get("group", {}).get("id") == ROBLOX_GROUP_ID:
             return g.get("role", {}).get("name", "Unknown")
     return "Not in group"
+
+def format_roblox_error(raw_error: str) -> str:
+    cleaned_error = (raw_error or "").strip()
+    try:
+        payload = json.loads(cleaned_error)
+    except json.JSONDecodeError:
+        return cleaned_error or "Roblox API request failed."
+
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        first_error = errors[0]
+        if isinstance(first_error, dict):
+            friendly_message = first_error.get("userFacingMessage") or first_error.get("message")
+            if friendly_message:
+                return str(friendly_message)
+
+    return cleaned_error or "Roblox API request failed."
 
 def get_role_value(role_name: str) -> int | None:
     if role_name in {"Unknown", "Not in group"}:
@@ -488,7 +506,7 @@ async def applications_reject(interaction: discord.Interaction, message_link: st
 # --- CORE BOT COMMANDS ---
 @bot.tree.command(name="ssu", description="Announce a Server Start Up (SSU).")
 @app_commands.checks.cooldown(1, 600, key=lambda i: i.guild_id)
-@has_any_role(EP_AND_ABOVE_ROLES)
+@has_any_role(SSU_ALLOWED_ROLES)
 async def ssu(interaction: discord.Interaction):
     ssu_channel = bot.get_channel(SSU_CHANNEL_ID)
     if not ssu_channel:
@@ -651,7 +669,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         )
 
         if r.status_code != 200:
-            raise RuntimeError(r.text)
+            raise RuntimeError(format_roblox_error(r.text))
 
         result = "✅ Success"
         color = discord.Color.green()
