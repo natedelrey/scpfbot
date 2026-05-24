@@ -91,6 +91,7 @@ DISCORD_RANK_LIMITS = {
     "1233139781840670743": 7,    # O5 Discord -> max Level-5 Roblox (value 7)
     "1233139781840670746": 9,    # O5 Head Discord -> max O5 Council Roblox (value 9)
     "1233139781840670749": 999,  # Administrator Discord -> unrestricted
+    "1508079170192932986": 5,    # Added role -> max Level-3 Roblox (value 5)
 }
 
 # --- BOT SETUP ---
