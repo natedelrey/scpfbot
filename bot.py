@@ -363,14 +363,11 @@ def get_unranked_group_users():
         if role_id == desired_role_id:
             auto_class_d_debug(f"Skipping desired Class-D role '{role_name}' (id={role_id}).")
             continue
-        role_users = get_group_users_by_role(role_id)
-        auto_class_d_debug(f"Role '{role_name}' has {len(role_users)} rank-0 users before normalization.")
-        for user in role_users:
+        for user in get_group_users_by_role(role_id):
             user_id, username = normalize_group_role_user(user)
             if user_id is None:
-                auto_class_d_debug(f"Skipping rank-0 Roblox user with unrecognized payload: {user}")
+                print(f"Skipping rank-0 Roblox user with unrecognized payload: {user}")
                 continue
-            auto_class_d_debug(f"Queued {username} ({user_id}) from '{role_name}' for Class-D ranking.")
             unranked_users.append({
                 "id": user_id,
                 "name": username,
