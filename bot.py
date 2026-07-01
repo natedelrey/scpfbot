@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, UTC, timedelta
 import os
@@ -182,19 +182,6 @@ _group_roles_cache_time = 0.0
 _GROUP_ROLES_CACHE_SECONDS = 300  # 5 minutes
 _rank_cooldown_seconds = 15
 _rank_last_used = {}
-_AUTO_CLASS_D_INTERVAL_SECONDS = int(os.getenv("AUTO_CLASS_D_INTERVAL_SECONDS", "120"))
-_AUTO_CLASS_D_ROLE_NAME = os.getenv("AUTO_CLASS_D_ROLE_NAME", "Class D")
-_AUTO_CLASS_D_SOURCE_ROLE_NAME = os.getenv("AUTO_CLASS_D_SOURCE_ROLE_NAME", "Member")
-_AUTO_CLASS_D_PAGE_LIMIT = 100
-_AUTO_CLASS_D_DEBUG = os.getenv("AUTO_CLASS_D_DEBUG", "true").lower() not in {"0", "false", "no", "off"}
-_AUTO_CLASS_D_FLOW_VERSION = "source-role-member-only-v4"
-
-def auto_class_d_debug(message: str):
-    if _AUTO_CLASS_D_DEBUG:
-        print(f"[Auto Class-D] {datetime.now(UTC).isoformat()} {message}", flush=True)
-
-def get_auto_class_d_flow_version() -> str:
-    return globals().get("_AUTO_CLASS_D_FLOW_VERSION", "source-role-member-only-v4")
 
 def roblox_request(method: str, url: str, json=None):
     """
@@ -247,33 +234,23 @@ def get_group_roles():
     global _group_roles_cache, _group_roles_cache_time
     now = time.time()
     if _group_roles_cache and (now - _group_roles_cache_time) < _GROUP_ROLES_CACHE_SECONDS:
-        auto_class_d_debug(f"Using cached group roles ({len(_group_roles_cache)} roles).")
         return _group_roles_cache
 
-    auto_class_d_debug(f"Fetching Roblox group roles for group {ROBLOX_GROUP_ID}.")
     r = requests.get(f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/roles")
     if r.status_code != 200:
         raise RuntimeError(f"Failed to fetch group roles: {r.text}")
 
     roles = r.json().get("roles", [])
-    auto_class_d_debug(
-        "Fetched group roles: "
-        + ", ".join(f"{role.get('name')}[id={role.get('id')}, rank={role.get('rank')}]" for role in roles)
-    )
     _group_roles_cache = roles
     _group_roles_cache_time = now
     return roles
 
 def get_role_id_by_name(role_name: str) -> int:
     normalized_role_name = re.sub(r"[^a-z0-9]", "", role_name.lower())
-    auto_class_d_debug(f"Resolving Roblox role name '{role_name}' (normalized '{normalized_role_name}').")
     for role in get_group_roles():
         normalized_group_role_name = re.sub(r"[^a-z0-9]", "", role.get("name", "").lower())
         if normalized_group_role_name == normalized_role_name:
-            role_id = int(role["id"])
-            auto_class_d_debug(f"Resolved Roblox role '{role.get('name')}' to id {role_id}.")
-            return role_id
-    auto_class_d_debug(f"Could not resolve Roblox role '{role_name}'.")
+            return int(role["id"])
     raise ValueError("That role does not exist in the Roblox group.")
 
 def get_current_role_name(user_id: int) -> str:
@@ -284,155 +261,6 @@ def get_current_role_name(user_id: int) -> str:
         if g.get("group", {}).get("id") == ROBLOX_GROUP_ID:
             return g.get("role", {}).get("name", "Unknown")
     return "Not in group"
-
-
-def get_group_users_by_role(role_id: int):
-    """
-    Returns all Roblox users currently assigned to a specific group role.
-
-    Roblox has returned both flat user objects (``id``/``name``) and nested
-    objects (``user.userId``/``user.username``) from this endpoint. Keep the
-    raw entries and normalize them in one place so the auto-ranker does not
-    skip or crash on rank-0 members when the response shape changes.
-    """
-    users = []
-    cursor = ""
-
-    page_number = 1
-    while True:
-        params = {"limit": _AUTO_CLASS_D_PAGE_LIMIT, "sortOrder": "Asc"}
-        if cursor:
-            params["cursor"] = cursor
-
-        auto_class_d_debug(f"Fetching users for role id {role_id}, page {page_number}.")
-        r = requests.get(
-            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/roles/{role_id}/users",
-            params=params,
-        )
-        if r.status_code != 200:
-            auto_class_d_debug(f"Failed fetching users for role id {role_id}: HTTP {r.status_code} {r.text}")
-            raise RuntimeError(f"Failed to fetch users for Roblox role {role_id}: {r.text}")
-
-        payload = r.json()
-        page_users = payload.get("data", [])
-        users.extend(page_users)
-        auto_class_d_debug(f"Fetched {len(page_users)} users for role id {role_id} on page {page_number}.")
-        cursor = payload.get("nextPageCursor")
-        if not cursor:
-            break
-        page_number += 1
-
-    return users
-
-def normalize_group_role_user(user: dict) -> tuple[int | None, str]:
-    """
-    Extract a Roblox user ID and display name from known group-user payloads.
-    """
-    nested_user = user.get("user") if isinstance(user.get("user"), dict) else {}
-    user_id = (
-        user.get("userId")
-        or user.get("id")
-        or nested_user.get("userId")
-        or nested_user.get("id")
-    )
-    username = (
-        user.get("username")
-        or user.get("name")
-        or user.get("displayName")
-        or nested_user.get("username")
-        or nested_user.get("name")
-        or nested_user.get("displayName")
-        or str(user_id)
-    )
-
-    try:
-        return int(user_id), username
-    except (TypeError, ValueError):
-        return None, username
-
-def get_unranked_group_users():
-    """
-    Returns group members in the configured source role that should become Class-D.
-
-    Roblox group users can only hold one group role at a time, so someone in
-    the default ``Member`` source role is a user with no elevated group role.
-    The auto-ranker should therefore scan the configured source role directly
-    instead of only rank-0 roles such as ``Guest``.
-    """
-    auto_class_d_debug(
-        f"Scanning users in source role '{_AUTO_CLASS_D_SOURCE_ROLE_NAME}' "
-        f"to move to '{_AUTO_CLASS_D_ROLE_NAME}'."
-    )
-    desired_role_id = get_role_id_by_name(_AUTO_CLASS_D_ROLE_NAME)
-    source_role_id = get_role_id_by_name(_AUTO_CLASS_D_SOURCE_ROLE_NAME)
-    if source_role_id == desired_role_id:
-        raise ValueError("AUTO_CLASS_D_SOURCE_ROLE_NAME must not match AUTO_CLASS_D_ROLE_NAME.")
-
-    source_role_name = _AUTO_CLASS_D_SOURCE_ROLE_NAME
-    for role in get_group_roles():
-        role_id = int(role["id"])
-        role_name = role.get("name", "Unknown")
-        role_rank = int(role.get("rank", -1))
-        auto_class_d_debug(f"Inspecting role '{role_name}' (id={role_id}, rank={role_rank}).")
-        if role_id == source_role_id:
-            source_role_name = role_name
-            break
-
-    unranked_users = []
-    for user in get_group_users_by_role(source_role_id):
-        user_id, username = normalize_group_role_user(user)
-        if user_id is None:
-            print(f"Skipping source-role Roblox user with unrecognized payload: {user}")
-            continue
-        unranked_users.append({
-            "id": user_id,
-            "name": username,
-            "role_name": source_role_name,
-        })
-
-    auto_class_d_debug(
-        f"Found {len(unranked_users)} users in source role '{source_role_name}' "
-        f"to move to '{_AUTO_CLASS_D_ROLE_NAME}'."
-    )
-    return unranked_users
-
-def set_roblox_user_role(user_id: int, role_name: str):
-    role_id = get_role_id_by_name(role_name)
-    auto_class_d_debug(f"Ranking Roblox user {user_id} to '{role_name}' (role id {role_id}).")
-    r = roblox_request(
-        "PATCH",
-        f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users/{user_id}",
-        json={"roleId": role_id},
-    )
-    auto_class_d_debug(f"Rank PATCH for Roblox user {user_id} returned HTTP {r.status_code}: {r.text[:500]}")
-    if r.status_code != 200:
-        raise RuntimeError(format_roblox_error(r.text))
-
-async def send_rank_log(actor: str, target: str, old_role_name: str, new_role_name: str, result: str, reason: str, error_message: str | None = None):
-    log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
-    if not log_channel:
-        return
-
-    embed = discord.Embed(
-        title="Rank Log",
-        color=discord.Color.red() if error_message else discord.Color.green(),
-        timestamp=datetime.now(UTC),
-    )
-    embed.add_field(name="Executive", value=actor, inline=False)
-    embed.add_field(name="Target", value=target, inline=False)
-    embed.add_field(name="Old → New", value=f"{old_role_name} → {new_role_name}", inline=False)
-    embed.add_field(name="Result", value=result, inline=False)
-    embed.add_field(name="Reason", value=reason, inline=False)
-    if error_message:
-        embed.add_field(name="Error", value=textwrap.shorten(error_message, width=1024, placeholder="…"), inline=False)
-
-    await log_channel.send(embed=embed)
-
-async def safe_send_rank_log(*args, **kwargs):
-    try:
-        await send_rank_log(*args, **kwargs)
-    except Exception as e:
-        print(f"Rank log send failed: {e}")
 
 def format_roblox_error(raw_error: str) -> str:
     cleaned_error = (raw_error or "").strip()
@@ -471,15 +299,9 @@ def get_role_value(role_name: str) -> int | None:
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
-    auto_class_d_debug(
-        f"Loaded auto-ranker flow {get_auto_class_d_flow_version()}: "
-        f"source='{_AUTO_CLASS_D_SOURCE_ROLE_NAME}', destination='{_AUTO_CLASS_D_ROLE_NAME}'."
-    )
     load_motion_state()
     register_motion_views()
     restore_motion_timers()
-    if not auto_class_d_ranker.is_running():
-        auto_class_d_ranker.start()
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
@@ -795,50 +617,6 @@ async def announce_edit(
     }
 
     await interaction.response.send_modal(EditAnnouncementModal(message=message, original_embed=original_embed, **modal_kwargs))
-@tasks.loop(seconds=_AUTO_CLASS_D_INTERVAL_SECONDS)
-async def auto_class_d_ranker():
-    auto_class_d_debug("Auto Class-D ranker tick started.")
-    try:
-        unranked_users = await asyncio.to_thread(get_unranked_group_users)
-    except Exception as e:
-        auto_class_d_debug(f"Auto Class-D rank check failed: {type(e).__name__}: {e}")
-        return
-
-    if not unranked_users:
-        auto_class_d_debug("No source-role users found to rank this tick.")
-        return
-
-    auto_class_d_debug(f"Attempting to rank {len(unranked_users)} users to '{_AUTO_CLASS_D_ROLE_NAME}'.")
-    for user in unranked_users:
-        try:
-            await asyncio.to_thread(set_roblox_user_role, user["id"], _AUTO_CLASS_D_ROLE_NAME)
-            await safe_send_rank_log(
-                actor="Automated rank done by bot",
-                target=user["name"],
-                old_role_name=user["role_name"],
-                new_role_name=_AUTO_CLASS_D_ROLE_NAME,
-                result="✅ Success",
-                reason="Automated rank done by bot",
-            )
-            auto_class_d_debug(f"Successfully ranked {user['name']} ({user['id']}) to '{_AUTO_CLASS_D_ROLE_NAME}'.")
-            await asyncio.sleep(1)
-        except Exception as e:
-            error_message = str(e)
-            auto_class_d_debug(f"Auto Class-D rank failed for {user['name']} ({user['id']}): {type(e).__name__}: {error_message}")
-            await safe_send_rank_log(
-                actor="Automated rank done by bot",
-                target=user["name"],
-                old_role_name=user["role_name"],
-                new_role_name=_AUTO_CLASS_D_ROLE_NAME,
-                result="❌ Failed",
-                reason="Automated rank done by bot",
-                error_message=error_message,
-            )
-
-@auto_class_d_ranker.before_loop
-async def before_auto_class_d_ranker():
-    await bot.wait_until_ready()
-
 
 # ===================== NEW: /RANK (WORKING) =====================
 @bot.tree.command(name="rank", description="Rank a Roblox user in the group (username or userId).")
@@ -851,6 +629,7 @@ async def before_auto_class_d_ranker():
     reason="Reason for this action (required)"
 )
 async def rank(interaction: discord.Interaction, target: str, rank: app_commands.Choice[str], reason: str):
+    log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
     max_allowed_value = get_max_allowed_rank_value(interaction.user)
     now = time.time()
     last_used = _rank_last_used.get(interaction.user.id, 0)
@@ -884,25 +663,42 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         if desired_value > max_allowed_value:
             raise PermissionError("You are not authorized to assign that rank.")
 
-        set_roblox_user_role(user_id, desired_role_name)
+        role_id = get_role_id_by_name(desired_role_name)
+
+        r = roblox_request(
+            "PATCH",
+            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users/{user_id}",
+            json={"roleId": role_id}
+        )
+
+        if r.status_code != 200:
+            raise RuntimeError(format_roblox_error(r.text))
 
         result = "✅ Success"
+        color = discord.Color.green()
         response = f"✅ Ranked **{username}** to **{desired_role_name}**."
 
     except Exception as e:
         result = "❌ Failed"
+        color = discord.Color.red()
         error_message = str(e)
         response = f"❌ {error_message}"
 
-    await safe_send_rank_log(
-        actor=interaction.user.mention,
-        target=username if 'username' in locals() else target,
-        old_role_name=old_role_name if 'old_role_name' in locals() else "Unknown",
-        new_role_name=rank.value,
-        result=result,
-        reason=reason,
-        error_message=error_message,
+    embed = discord.Embed(
+        title="Rank Log",
+        color=color,
+        timestamp=datetime.now(UTC)
     )
+    embed.add_field(name="Executive", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Target", value=username if 'username' in locals() else target, inline=False)
+    embed.add_field(name="Old → New", value=f"{old_role_name if 'old_role_name' in locals() else 'Unknown'} → {rank.value}", inline=False)
+    embed.add_field(name="Result", value=result, inline=False)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    if error_message:
+        embed.add_field(name="Error", value=textwrap.shorten(error_message, width=1024, placeholder="…"), inline=False)
+
+    if log_channel:
+        await log_channel.send(embed=embed)
 
     await interaction.response.send_message(response, ephemeral=True)
 
