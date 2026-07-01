@@ -457,6 +457,10 @@ def get_role_value(role_name: str) -> int | None:
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
+    auto_class_d_debug(
+        f"Loaded auto-ranker flow {_AUTO_CLASS_D_FLOW_VERSION}: "
+        f"source='{_AUTO_CLASS_D_SOURCE_ROLE_NAME}', destination='{_AUTO_CLASS_D_ROLE_NAME}'."
+    )
     load_motion_state()
     register_motion_views()
     restore_motion_timers()
