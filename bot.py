@@ -269,6 +269,11 @@ def get_current_role_name(user_id: int) -> str:
 def get_group_users_by_role(role_id: int):
     """
     Returns all Roblox users currently assigned to a specific group role.
+
+    Roblox has returned both flat user objects (``id``/``name``) and nested
+    objects (``user.userId``/``user.username``) from this endpoint. Keep the
+    raw entries and normalize them in one place so the auto-ranker does not
+    skip or crash on rank-0 members when the response shape changes.
     """
     users = []
     cursor = ""
@@ -293,6 +298,32 @@ def get_group_users_by_role(role_id: int):
 
     return users
 
+def normalize_group_role_user(user: dict) -> tuple[int | None, str]:
+    """
+    Extract a Roblox user ID and display name from known group-user payloads.
+    """
+    nested_user = user.get("user") if isinstance(user.get("user"), dict) else {}
+    user_id = (
+        user.get("userId")
+        or user.get("id")
+        or nested_user.get("userId")
+        or nested_user.get("id")
+    )
+    username = (
+        user.get("username")
+        or user.get("name")
+        or user.get("displayName")
+        or nested_user.get("username")
+        or nested_user.get("name")
+        or nested_user.get("displayName")
+        or str(user_id)
+    )
+
+    try:
+        return int(user_id), username
+    except (TypeError, ValueError):
+        return None, username
+
 def get_unranked_group_users():
     """
     Returns group members in any rank-0 Roblox role, excluding the desired Class-D role itself.
@@ -307,10 +338,12 @@ def get_unranked_group_users():
         if role_id == desired_role_id:
             continue
         for user in get_group_users_by_role(role_id):
-            user_id = user.get("userId") or user.get("id")
-            username = user.get("username") or user.get("name") or str(user_id)
+            user_id, username = normalize_group_role_user(user)
+            if user_id is None:
+                print(f"Skipping rank-0 Roblox user with unrecognized payload: {user}")
+                continue
             unranked_users.append({
-                "id": int(user_id),
+                "id": user_id,
                 "name": username,
                 "role_name": role.get("name", "No Rank"),
             })
