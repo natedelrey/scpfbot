@@ -184,6 +184,7 @@ _rank_cooldown_seconds = 15
 _rank_last_used = {}
 _AUTO_CLASS_D_INTERVAL_SECONDS = int(os.getenv("AUTO_CLASS_D_INTERVAL_SECONDS", "120"))
 _AUTO_CLASS_D_ROLE_NAME = os.getenv("AUTO_CLASS_D_ROLE_NAME", "Class D")
+_AUTO_CLASS_D_SOURCE_ROLE_NAME = os.getenv("AUTO_CLASS_D_SOURCE_ROLE_NAME", "Member")
 _AUTO_CLASS_D_PAGE_LIMIT = 100
 _AUTO_CLASS_D_DEBUG = os.getenv("AUTO_CLASS_D_DEBUG", "true").lower() not in {"0", "false", "no", "off"}
 
@@ -347,10 +348,14 @@ def normalize_group_role_user(user: dict) -> tuple[int | None, str]:
 
 def get_unranked_group_users():
     """
-    Returns group members in any rank-0 Roblox role, excluding the desired Class-D role itself.
+    Returns group members in the configured source role that should become Class-D.
     """
     auto_class_d_debug(f"Scanning for rank-0 users to move to '{_AUTO_CLASS_D_ROLE_NAME}'.")
     desired_role_id = get_role_id_by_name(_AUTO_CLASS_D_ROLE_NAME)
+    source_role_id = get_role_id_by_name(_AUTO_CLASS_D_SOURCE_ROLE_NAME)
+    if source_role_id == desired_role_id:
+        raise ValueError("AUTO_CLASS_D_SOURCE_ROLE_NAME must not match AUTO_CLASS_D_ROLE_NAME.")
+
     unranked_users = []
 
     for role in get_group_roles():
