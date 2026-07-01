@@ -289,7 +289,7 @@ def get_group_users_by_role(role_id: int):
     Roblox has returned both flat user objects (``id``/``name``) and nested
     objects (``user.userId``/``user.username``) from this endpoint. Keep the
     raw entries and normalize them in one place so the auto-ranker does not
-    skip or crash when the response shape changes.
+    skip or crash on rank-0 members when the response shape changes.
     """
     users = []
     cursor = ""
@@ -300,7 +300,7 @@ def get_group_users_by_role(role_id: int):
         if cursor:
             params["cursor"] = cursor
 
-        auto_class_d_debug(f"Fetching users for source role id {role_id}, page {page_number}.")
+        auto_class_d_debug(f"Fetching users for rank-0 role id {role_id}, page {page_number}.")
         r = requests.get(
             f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/roles/{role_id}/users",
             params=params,
@@ -350,10 +350,7 @@ def get_unranked_group_users():
     """
     Returns group members in the configured source role that should become Class-D.
     """
-    auto_class_d_debug(
-        f"Scanning for users in source role '{_AUTO_CLASS_D_SOURCE_ROLE_NAME}' "
-        f"to move to '{_AUTO_CLASS_D_ROLE_NAME}'."
-    )
+    auto_class_d_debug(f"Scanning for rank-0 users to move to '{_AUTO_CLASS_D_ROLE_NAME}'.")
     desired_role_id = get_role_id_by_name(_AUTO_CLASS_D_ROLE_NAME)
     source_role_id = get_role_id_by_name(_AUTO_CLASS_D_SOURCE_ROLE_NAME)
     if source_role_id == desired_role_id:
@@ -366,27 +363,23 @@ def get_unranked_group_users():
         role_id = int(role["id"])
         role_name = role.get("name", "No Rank")
         auto_class_d_debug(f"Inspecting role '{role_name}' (id={role_id}, rank={role_rank}).")
-        if role_id != source_role_id:
+        if role_rank != 0:
             continue
-
-        role_users = get_group_users_by_role(role_id)
-        auto_class_d_debug(f"Source role '{role_name}' has {len(role_users)} users before normalization.")
-        for user in role_users:
+        if role_id == desired_role_id:
+            auto_class_d_debug(f"Skipping desired Class-D role '{role_name}' (id={role_id}).")
+            continue
+        for user in get_group_users_by_role(role_id):
             user_id, username = normalize_group_role_user(user)
             if user_id is None:
-                auto_class_d_debug(f"Skipping source-role Roblox user with unrecognized payload: {user}")
+                print(f"Skipping rank-0 Roblox user with unrecognized payload: {user}")
                 continue
-            auto_class_d_debug(f"Queued {username} ({user_id}) from '{role_name}' for Class-D ranking.")
             unranked_users.append({
                 "id": user_id,
                 "name": username,
                 "role_name": role_name,
             })
 
-    auto_class_d_debug(
-        f"Found {len(unranked_users)} users in source role '{_AUTO_CLASS_D_SOURCE_ROLE_NAME}' "
-        f"to move to '{_AUTO_CLASS_D_ROLE_NAME}'."
-    )
+    auto_class_d_debug(f"Found {len(unranked_users)} rank-0 users to move to '{_AUTO_CLASS_D_ROLE_NAME}'.")
     return unranked_users
 
 def set_roblox_user_role(user_id: int, role_name: str):
@@ -794,7 +787,7 @@ async def auto_class_d_ranker():
         return
 
     if not unranked_users:
-        auto_class_d_debug("No source-role users found to rank this tick.")
+        auto_class_d_debug("No rank-0 users found to rank this tick.")
         return
 
     auto_class_d_debug(f"Attempting to rank {len(unranked_users)} users to '{_AUTO_CLASS_D_ROLE_NAME}'.")
