@@ -187,14 +187,14 @@ _AUTO_CLASS_D_ROLE_NAME = os.getenv("AUTO_CLASS_D_ROLE_NAME", "Class D")
 _AUTO_CLASS_D_SOURCE_ROLE_NAME = os.getenv("AUTO_CLASS_D_SOURCE_ROLE_NAME", "Member")
 _AUTO_CLASS_D_PAGE_LIMIT = 100
 _AUTO_CLASS_D_DEBUG = os.getenv("AUTO_CLASS_D_DEBUG", "true").lower() not in {"0", "false", "no", "off"}
-_AUTO_CLASS_D_FLOW_VERSION = "source-role-member-only-v5"
+_AUTO_CLASS_D_FLOW_VERSION = "source-role-member-only-v4"
 
 def auto_class_d_debug(message: str):
     if _AUTO_CLASS_D_DEBUG:
         print(f"[Auto Class-D] {datetime.now(UTC).isoformat()} {message}", flush=True)
 
 def get_auto_class_d_flow_version() -> str:
-    return globals().get("_AUTO_CLASS_D_FLOW_VERSION", "source-role-member-only-v5")
+    return globals().get("_AUTO_CLASS_D_FLOW_VERSION", "source-role-member-only-v4")
 
 def roblox_request(method: str, url: str, json=None):
     """
@@ -356,10 +356,8 @@ def get_unranked_group_users():
 
     Roblox group users can only hold one group role at a time, so someone in
     the default ``Member`` source role is a user with no elevated group role.
-    The auto-ranker scans the configured source role directly, then verifies
-    each candidate still has exactly that source role before ranking. This
-    prevents users in elevated roles such as Level 1 or Level 2 from being
-    moved if Roblox returns stale or unexpectedly broad role-user data.
+    The auto-ranker should therefore scan the configured source role directly
+    instead of only rank-0 roles such as ``Guest``.
     """
     auto_class_d_debug(
         f"Scanning users in source role '{_AUTO_CLASS_D_SOURCE_ROLE_NAME}' "
@@ -380,31 +378,20 @@ def get_unranked_group_users():
             source_role_name = role_name
             break
 
-    normalized_source_role_name = re.sub(r"[^a-z0-9]", "", source_role_name.lower())
     unranked_users = []
     for user in get_group_users_by_role(source_role_id):
         user_id, username = normalize_group_role_user(user)
         if user_id is None:
             print(f"Skipping source-role Roblox user with unrecognized payload: {user}")
             continue
-
-        current_role_name = get_current_role_name(user_id)
-        normalized_current_role_name = re.sub(r"[^a-z0-9]", "", current_role_name.lower())
-        if normalized_current_role_name != normalized_source_role_name:
-            auto_class_d_debug(
-                f"Skipping {username} ({user_id}); current role is '{current_role_name}', "
-                f"not source role '{source_role_name}'."
-            )
-            continue
-
         unranked_users.append({
             "id": user_id,
             "name": username,
-            "role_name": current_role_name,
+            "role_name": source_role_name,
         })
 
     auto_class_d_debug(
-        f"Found {len(unranked_users)} verified users in source role '{source_role_name}' "
+        f"Found {len(unranked_users)} users in source role '{source_role_name}' "
         f"to move to '{_AUTO_CLASS_D_ROLE_NAME}'."
     )
     return unranked_users
