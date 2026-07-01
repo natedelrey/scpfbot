@@ -347,6 +347,12 @@ async def send_rank_log(actor: str, target: str, old_role_name: str, new_role_na
 
     await log_channel.send(embed=embed)
 
+async def safe_send_rank_log(*args, **kwargs):
+    try:
+        await send_rank_log(*args, **kwargs)
+    except Exception as e:
+        print(f"Rank log send failed: {e}")
+
 def format_roblox_error(raw_error: str) -> str:
     cleaned_error = (raw_error or "").strip()
     try:
@@ -715,7 +721,7 @@ async def auto_class_d_ranker():
     for user in unranked_users:
         try:
             await asyncio.to_thread(set_roblox_user_role, user["id"], _AUTO_CLASS_D_ROLE_NAME)
-            await send_rank_log(
+            await safe_send_rank_log(
                 actor="Automated rank done by bot",
                 target=user["name"],
                 old_role_name=user["role_name"],
@@ -727,7 +733,7 @@ async def auto_class_d_ranker():
         except Exception as e:
             error_message = str(e)
             print(f"Auto Class-D rank failed for {user['name']} ({user['id']}): {error_message}")
-            await send_rank_log(
+            await safe_send_rank_log(
                 actor="Automated rank done by bot",
                 target=user["name"],
                 old_role_name=user["role_name"],
@@ -796,7 +802,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         error_message = str(e)
         response = f"❌ {error_message}"
 
-    await send_rank_log(
+    await safe_send_rank_log(
         actor=interaction.user.mention,
         target=username if 'username' in locals() else target,
         old_role_name=old_role_name if 'old_role_name' in locals() else "Unknown",
