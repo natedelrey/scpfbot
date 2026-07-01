@@ -187,10 +187,14 @@ _AUTO_CLASS_D_ROLE_NAME = os.getenv("AUTO_CLASS_D_ROLE_NAME", "Class D")
 _AUTO_CLASS_D_SOURCE_ROLE_NAME = os.getenv("AUTO_CLASS_D_SOURCE_ROLE_NAME", "Member")
 _AUTO_CLASS_D_PAGE_LIMIT = 100
 _AUTO_CLASS_D_DEBUG = os.getenv("AUTO_CLASS_D_DEBUG", "true").lower() not in {"0", "false", "no", "off"}
+_AUTO_CLASS_D_FLOW_VERSION = "source-role-member-only-v3"
 
 def auto_class_d_debug(message: str):
     if _AUTO_CLASS_D_DEBUG:
         print(f"[Auto Class-D] {datetime.now(UTC).isoformat()} {message}", flush=True)
+
+def get_auto_class_d_flow_version() -> str:
+    return globals().get("_AUTO_CLASS_D_FLOW_VERSION", "source-role-member-only-v3")
 
 def roblox_request(method: str, url: str, json=None):
     """
@@ -458,7 +462,7 @@ def get_role_value(role_name: str) -> int | None:
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
     auto_class_d_debug(
-        f"Loaded auto-ranker flow {_AUTO_CLASS_D_FLOW_VERSION}: "
+        f"Loaded auto-ranker flow {get_auto_class_d_flow_version()}: "
         f"source='{_AUTO_CLASS_D_SOURCE_ROLE_NAME}', destination='{_AUTO_CLASS_D_ROLE_NAME}'."
     )
     load_motion_state()
