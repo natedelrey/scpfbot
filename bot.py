@@ -185,7 +185,6 @@ _rank_last_used = {}
 _AUTO_CLASS_D_INTERVAL_SECONDS = int(os.getenv("AUTO_CLASS_D_INTERVAL_SECONDS", "120"))
 _AUTO_CLASS_D_ROLE_NAME = os.getenv("AUTO_CLASS_D_ROLE_NAME", "Class D")
 _AUTO_CLASS_D_PAGE_LIMIT = 100
-_UNRANKED_ROLE_NAMES = {"norank", "guest", "member"}
 
 def roblox_request(method: str, url: str, json=None):
     """
@@ -267,12 +266,9 @@ def get_current_role_name(user_id: int) -> str:
     return "Not in group"
 
 
-def get_group_users():
+def get_group_users_by_role(role_id: int):
     """
-    Returns all current Roblox group members with their current group role data.
-
-    This uses the group member listing endpoint instead of role-specific user
-    listings so members in Roblox's default/no-rank bucket are not missed.
+    Returns all Roblox users currently assigned to a specific group role.
     """
     users = []
     cursor = ""
@@ -283,11 +279,11 @@ def get_group_users():
             params["cursor"] = cursor
 
         r = requests.get(
-            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users",
+            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/roles/{role_id}/users",
             params=params,
         )
         if r.status_code != 200:
-            raise RuntimeError(f"Failed to fetch Roblox group users: {r.text}")
+            raise RuntimeError(f"Failed to fetch users for Roblox role {role_id}: {r.text}")
 
         payload = r.json()
         users.extend(payload.get("data", []))
@@ -299,56 +295,27 @@ def get_group_users():
 
 def get_unranked_group_users():
     """
-    Returns group members whose current Roblox group role is rank 0/no rank.
+    Returns group members in any rank-0 Roblox role, excluding the desired Class-D role itself.
     """
     desired_role_id = get_role_id_by_name(_AUTO_CLASS_D_ROLE_NAME)
     unranked_users = []
 
-    for member in get_group_users():
-        user = member.get("user") or member
-        role = member.get("role") or {}
-        role_id = role.get("id")
-        role_rank = role.get("rank")
-
-        try:
-            normalized_role_id = int(role_id) if role_id is not None else None
-        except (TypeError, ValueError):
-            normalized_role_id = None
-
-        if normalized_role_id == desired_role_id:
+    for role in get_group_roles():
+        if int(role.get("rank", -1)) != 0:
             continue
-
-        normalized_role_name = re.sub(r"[^a-z0-9]", "", (role.get("name") or "").lower())
-        try:
-            is_unranked = role_rank is None or int(role_rank) == 0
-        except (TypeError, ValueError):
-            is_unranked = True
-
-        if normalized_role_name in _UNRANKED_ROLE_NAMES:
-            is_unranked = True
-
-        if not is_unranked:
+        role_id = int(role["id"])
+        if role_id == desired_role_id:
             continue
-
-        user_id = user.get("userId") or user.get("id")
-        if user_id is None:
-            continue
-        username = user.get("username") or user.get("name") or str(user_id)
-        unranked_users.append({
-            "id": int(user_id),
-            "name": username,
-            "role_name": role.get("name") or "No Rank",
-        })
+        for user in get_group_users_by_role(role_id):
+            user_id = user.get("userId") or user.get("id")
+            username = user.get("username") or user.get("name") or str(user_id)
+            unranked_users.append({
+                "id": int(user_id),
+                "name": username,
+                "role_name": role.get("name", "No Rank"),
+            })
 
     return unranked_users
-
-def is_unranked_role_name(role_name: str) -> bool:
-    if role_name in {"Unknown", "Not in group"}:
-        return False
-
-    normalized_role_name = re.sub(r"[^a-z0-9]", "", (role_name or "").lower())
-    role_value = get_role_value(role_name)
-    return role_value == 0 or normalized_role_name in _UNRANKED_ROLE_NAMES
 
 def set_roblox_user_role(user_id: int, role_name: str):
     role_id = get_role_id_by_name(role_name)
@@ -359,14 +326,6 @@ def set_roblox_user_role(user_id: int, role_name: str):
     )
     if r.status_code != 200:
         raise RuntimeError(format_roblox_error(r.text))
-
-def set_roblox_user_role_if_unranked(user_id: int, role_name: str):
-    current_role_name = get_current_role_name(user_id)
-    if not is_unranked_role_name(current_role_name):
-        return False, current_role_name
-
-    set_roblox_user_role(user_id, role_name)
-    return True, current_role_name
 
 async def send_rank_log(actor: str, target: str, old_role_name: str, new_role_name: str, result: str, reason: str, error_message: str | None = None):
     log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
@@ -753,24 +712,13 @@ async def auto_class_d_ranker():
         print(f"Auto Class-D rank check failed: {e}")
         return
 
-    if unranked_users:
-        print(f"Auto Class-D rank check found {len(unranked_users)} unranked member(s).")
-
     for user in unranked_users:
         try:
-            ranked, current_role_name = await asyncio.to_thread(
-                set_roblox_user_role_if_unranked,
-                user["id"],
-                _AUTO_CLASS_D_ROLE_NAME,
-            )
-            if not ranked:
-                print(f"Skipped auto Class-D rank for {user['name']} ({user['id']}): now ranked as {current_role_name}.")
-                continue
-
+            await asyncio.to_thread(set_roblox_user_role, user["id"], _AUTO_CLASS_D_ROLE_NAME)
             await send_rank_log(
                 actor="Automated rank done by bot",
                 target=user["name"],
-                old_role_name=current_role_name,
+                old_role_name=user["role_name"],
                 new_role_name=_AUTO_CLASS_D_ROLE_NAME,
                 result="✅ Success",
                 reason="Automated rank done by bot",
