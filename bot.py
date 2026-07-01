@@ -266,12 +266,9 @@ def get_current_role_name(user_id: int) -> str:
     return "Not in group"
 
 
-def get_group_users():
+def get_group_users_by_role(role_id: int):
     """
-    Returns all current Roblox group members with their current group role data.
-
-    This uses the group member listing endpoint instead of role-specific user
-    listings so members in Roblox's default/no-rank bucket are not missed.
+    Returns all Roblox users currently assigned to a specific group role.
     """
     users = []
     cursor = ""
@@ -282,11 +279,11 @@ def get_group_users():
             params["cursor"] = cursor
 
         r = requests.get(
-            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users",
+            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/roles/{role_id}/users",
             params=params,
         )
         if r.status_code != 200:
-            raise RuntimeError(f"Failed to fetch Roblox group users: {r.text}")
+            raise RuntimeError(f"Failed to fetch users for Roblox role {role_id}: {r.text}")
 
         payload = r.json()
         users.extend(payload.get("data", []))
@@ -298,42 +295,25 @@ def get_group_users():
 
 def get_unranked_group_users():
     """
-    Returns group members whose current Roblox group role is rank 0/no rank.
+    Returns group members in any rank-0 Roblox role, excluding the desired Class-D role itself.
     """
     desired_role_id = get_role_id_by_name(_AUTO_CLASS_D_ROLE_NAME)
     unranked_users = []
 
-    for member in get_group_users():
-        user = member.get("user") or member
-        role = member.get("role") or {}
-        role_id = role.get("id")
-        role_rank = role.get("rank")
-
-        try:
-            normalized_role_id = int(role_id) if role_id is not None else None
-        except (TypeError, ValueError):
-            normalized_role_id = None
-
-        if normalized_role_id == desired_role_id:
+    for role in get_group_roles():
+        if int(role.get("rank", -1)) != 0:
             continue
-
-        try:
-            is_unranked = role_rank is None or int(role_rank) == 0
-        except (TypeError, ValueError):
-            is_unranked = True
-
-        if not is_unranked:
+        role_id = int(role["id"])
+        if role_id == desired_role_id:
             continue
-
-        user_id = user.get("userId") or user.get("id")
-        if user_id is None:
-            continue
-        username = user.get("username") or user.get("name") or str(user_id)
-        unranked_users.append({
-            "id": int(user_id),
-            "name": username,
-            "role_name": role.get("name") or "No Rank",
-        })
+        for user in get_group_users_by_role(role_id):
+            user_id = user.get("userId") or user.get("id")
+            username = user.get("username") or user.get("name") or str(user_id)
+            unranked_users.append({
+                "id": int(user_id),
+                "name": username,
+                "role_name": role.get("name", "No Rank"),
+            })
 
     return unranked_users
 
