@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from datetime import datetime, UTC, timedelta
 import os
@@ -182,6 +182,9 @@ _group_roles_cache_time = 0.0
 _GROUP_ROLES_CACHE_SECONDS = 300  # 5 minutes
 _rank_cooldown_seconds = 15
 _rank_last_used = {}
+_AUTO_CLASS_D_INTERVAL_SECONDS = int(os.getenv("AUTO_CLASS_D_INTERVAL_SECONDS", "120"))
+_AUTO_CLASS_D_ROLE_NAME = os.getenv("AUTO_CLASS_D_ROLE_NAME", "Class D")
+_AUTO_CLASS_D_PAGE_LIMIT = 100
 
 def roblox_request(method: str, url: str, json=None):
     """
@@ -262,6 +265,88 @@ def get_current_role_name(user_id: int) -> str:
             return g.get("role", {}).get("name", "Unknown")
     return "Not in group"
 
+
+def get_group_users_by_role(role_id: int):
+    """
+    Returns all Roblox users currently assigned to a specific group role.
+    """
+    users = []
+    cursor = ""
+
+    while True:
+        params = {"limit": _AUTO_CLASS_D_PAGE_LIMIT, "sortOrder": "Asc"}
+        if cursor:
+            params["cursor"] = cursor
+
+        r = requests.get(
+            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/roles/{role_id}/users",
+            params=params,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"Failed to fetch users for Roblox role {role_id}: {r.text}")
+
+        payload = r.json()
+        users.extend(payload.get("data", []))
+        cursor = payload.get("nextPageCursor")
+        if not cursor:
+            break
+
+    return users
+
+def get_unranked_group_users():
+    """
+    Returns group members in any rank-0 Roblox role, excluding the desired Class-D role itself.
+    """
+    desired_role_id = get_role_id_by_name(_AUTO_CLASS_D_ROLE_NAME)
+    unranked_users = []
+
+    for role in get_group_roles():
+        if int(role.get("rank", -1)) != 0:
+            continue
+        role_id = int(role["id"])
+        if role_id == desired_role_id:
+            continue
+        for user in get_group_users_by_role(role_id):
+            user_id = user.get("userId") or user.get("id")
+            username = user.get("username") or user.get("name") or str(user_id)
+            unranked_users.append({
+                "id": int(user_id),
+                "name": username,
+                "role_name": role.get("name", "No Rank"),
+            })
+
+    return unranked_users
+
+def set_roblox_user_role(user_id: int, role_name: str):
+    role_id = get_role_id_by_name(role_name)
+    r = roblox_request(
+        "PATCH",
+        f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users/{user_id}",
+        json={"roleId": role_id},
+    )
+    if r.status_code != 200:
+        raise RuntimeError(format_roblox_error(r.text))
+
+async def send_rank_log(actor: str, target: str, old_role_name: str, new_role_name: str, result: str, reason: str, error_message: str | None = None):
+    log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
+    if not log_channel:
+        return
+
+    embed = discord.Embed(
+        title="Rank Log",
+        color=discord.Color.red() if error_message else discord.Color.green(),
+        timestamp=datetime.now(UTC),
+    )
+    embed.add_field(name="Executive", value=actor, inline=False)
+    embed.add_field(name="Target", value=target, inline=False)
+    embed.add_field(name="Old → New", value=f"{old_role_name} → {new_role_name}", inline=False)
+    embed.add_field(name="Result", value=result, inline=False)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    if error_message:
+        embed.add_field(name="Error", value=textwrap.shorten(error_message, width=1024, placeholder="…"), inline=False)
+
+    await log_channel.send(embed=embed)
+
 def format_roblox_error(raw_error: str) -> str:
     cleaned_error = (raw_error or "").strip()
     try:
@@ -302,6 +387,8 @@ async def on_ready():
     load_motion_state()
     register_motion_views()
     restore_motion_timers()
+    if not auto_class_d_ranker.is_running():
+        auto_class_d_ranker.start()
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
@@ -617,6 +704,43 @@ async def announce_edit(
     }
 
     await interaction.response.send_modal(EditAnnouncementModal(message=message, original_embed=original_embed, **modal_kwargs))
+@tasks.loop(seconds=_AUTO_CLASS_D_INTERVAL_SECONDS)
+async def auto_class_d_ranker():
+    try:
+        unranked_users = await asyncio.to_thread(get_unranked_group_users)
+    except Exception as e:
+        print(f"Auto Class-D rank check failed: {e}")
+        return
+
+    for user in unranked_users:
+        try:
+            await asyncio.to_thread(set_roblox_user_role, user["id"], _AUTO_CLASS_D_ROLE_NAME)
+            await send_rank_log(
+                actor="Automated rank done by bot",
+                target=user["name"],
+                old_role_name=user["role_name"],
+                new_role_name=_AUTO_CLASS_D_ROLE_NAME,
+                result="✅ Success",
+                reason="Automated rank done by bot",
+            )
+            await asyncio.sleep(1)
+        except Exception as e:
+            error_message = str(e)
+            print(f"Auto Class-D rank failed for {user['name']} ({user['id']}): {error_message}")
+            await send_rank_log(
+                actor="Automated rank done by bot",
+                target=user["name"],
+                old_role_name=user["role_name"],
+                new_role_name=_AUTO_CLASS_D_ROLE_NAME,
+                result="❌ Failed",
+                reason="Automated rank done by bot",
+                error_message=error_message,
+            )
+
+@auto_class_d_ranker.before_loop
+async def before_auto_class_d_ranker():
+    await bot.wait_until_ready()
+
 
 # ===================== NEW: /RANK (WORKING) =====================
 @bot.tree.command(name="rank", description="Rank a Roblox user in the group (username or userId).")
@@ -629,7 +753,6 @@ async def announce_edit(
     reason="Reason for this action (required)"
 )
 async def rank(interaction: discord.Interaction, target: str, rank: app_commands.Choice[str], reason: str):
-    log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
     max_allowed_value = get_max_allowed_rank_value(interaction.user)
     now = time.time()
     last_used = _rank_last_used.get(interaction.user.id, 0)
@@ -663,42 +786,25 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         if desired_value > max_allowed_value:
             raise PermissionError("You are not authorized to assign that rank.")
 
-        role_id = get_role_id_by_name(desired_role_name)
-
-        r = roblox_request(
-            "PATCH",
-            f"https://groups.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/users/{user_id}",
-            json={"roleId": role_id}
-        )
-
-        if r.status_code != 200:
-            raise RuntimeError(format_roblox_error(r.text))
+        set_roblox_user_role(user_id, desired_role_name)
 
         result = "✅ Success"
-        color = discord.Color.green()
         response = f"✅ Ranked **{username}** to **{desired_role_name}**."
 
     except Exception as e:
         result = "❌ Failed"
-        color = discord.Color.red()
         error_message = str(e)
         response = f"❌ {error_message}"
 
-    embed = discord.Embed(
-        title="Rank Log",
-        color=color,
-        timestamp=datetime.now(UTC)
+    await send_rank_log(
+        actor=interaction.user.mention,
+        target=username if 'username' in locals() else target,
+        old_role_name=old_role_name if 'old_role_name' in locals() else "Unknown",
+        new_role_name=rank.value,
+        result=result,
+        reason=reason,
+        error_message=error_message,
     )
-    embed.add_field(name="Executive", value=interaction.user.mention, inline=False)
-    embed.add_field(name="Target", value=username if 'username' in locals() else target, inline=False)
-    embed.add_field(name="Old → New", value=f"{old_role_name if 'old_role_name' in locals() else 'Unknown'} → {rank.value}", inline=False)
-    embed.add_field(name="Result", value=result, inline=False)
-    embed.add_field(name="Reason", value=reason, inline=False)
-    if error_message:
-        embed.add_field(name="Error", value=textwrap.shorten(error_message, width=1024, placeholder="…"), inline=False)
-
-    if log_channel:
-        await log_channel.send(embed=embed)
 
     await interaction.response.send_message(response, ephemeral=True)
 
