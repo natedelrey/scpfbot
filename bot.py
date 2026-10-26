@@ -87,11 +87,11 @@ NOTIFY_AND_APP_ROLES = EP_AND_ABOVE_ROLES + ["1234517225206059019", "15080791701
 # --- DISCORD ROLE -> MAX "RANK VALUE" THEY CAN ASSIGN ---
 # (These are your hierarchy values, NOT Roblox role IDs.)
 DISCORD_RANK_LIMITS = {
-    "1233139781823627473": 5,    # Level-4 Discord -> max Level-3 Roblox (value 5)
-    "1233139781840670743": 7,    # O5 Discord -> max Level-5 Roblox (value 7)
-    "1233139781840670746": 9,    # O5 Head Discord -> max O5 Council Roblox (value 9)
-    "1233139781840670749": 999,  # Administrator Discord -> unrestricted
-    "1508079170192932986": 7,    # Added role -> max Level-3 Roblox (value 5)
+    "1233139781823627473": 5,
+    "1233139781840670743": 7,
+    "1233139781840670746": 9,
+    "1233139781840670749": 999,
+    "1508079170192932986": 7,
 }
 
 # --- BOT SETUP ---
@@ -154,27 +154,148 @@ def extract_buttons_from_message(message: discord.Message):
 # ===================== ROBLOX HELPERS (WORKING VERSION) =====================
 # These are your "rank values" (hierarchy), NOT Roblox role IDs.
 ROBLOX_ROLE_VALUES = {
-    "Class D": 1,
-    "Class E": 2,
-    "Level 1": 3,
-    "Level 2": 4,
-    "Level 3": 5,
-    "Level 4": 6,
-    "Overseer Council": 9,
-    "Council Chairman": 10,
+    "Class - D": 1,
+    "Class - E": 3,
+    "Level - 1": 4,
+    "Level - 2": 5,
+    "Level - 3": 6,
+    "Level - 4": 7,
+    "O5 Council": 9,
+    "O5 Head": 10,
     "The Administrator": 11,
-    "Group Holder": 255,
 }
+RANK_SETUP_ROLES = ["1233139781840670746", "1233139781840670749"]
+RANK_CONFIG_FILE = os.getenv("RANK_CONFIG_FILE", "rank_config.json")
+rank_config_lock = asyncio.Lock()
 
-NORMALIZED_ROBLOX_ROLE_VALUES = {
-    re.sub(r"[^a-z0-9]", "", name.lower()): value
-    for name, value in ROBLOX_ROLE_VALUES.items()
-}
 
-RANK_CHOICES = [
-    app_commands.Choice(name=f"{name} (Value {val})", value=name)
-    for name, val in ROBLOX_ROLE_VALUES.items()
-]
+def validate_rank_config(config):
+    ranks, limits = config["ranks"], config["limits"]
+    if not isinstance(ranks, dict) or not ranks or not isinstance(limits, dict):
+        raise ValueError("Configuration must contain ranks and Discord role limits.")
+    normalized = set()
+    for name, value in ranks.items():
+        key = re.sub(r"[^a-z0-9]", "", name.lower())
+        if not key or len(name) > 80 or key in normalized:
+            raise ValueError("Rank names must be unique and between 1 and 80 characters.")
+        if type(value) is not int or not 1 <= value <= 255:
+            raise ValueError("Roblox rank values must be integers from 1 to 255.")
+        normalized.add(key)
+    if len(set(ranks.values())) != len(ranks):
+        raise ValueError("Roblox rank values must be unique.")
+    for role, limit in limits.items():
+        if not role.isdigit() or type(limit) is not int or not 0 <= limit <= 999:
+            raise ValueError("Discord limits require a role ID and a value from 0 to 999.")
+    return config
+
+
+def read_rank_config():
+    if DATABASE_URL:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS bot_rank_config (config_key TEXT PRIMARY KEY, config_value JSONB NOT NULL)")
+                cur.execute("SELECT config_value FROM bot_rank_config WHERE config_key = %s", ("ranks",))
+                row = cur.fetchone()
+        return validate_rank_config(row[0]) if row else None
+    if os.path.exists(RANK_CONFIG_FILE):
+        with open(RANK_CONFIG_FILE, encoding="utf-8") as f:
+            return validate_rank_config(json.load(f))
+    return None
+
+
+def write_rank_config(config):
+    validate_rank_config(config)
+    if DATABASE_URL:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS bot_rank_config (config_key TEXT PRIMARY KEY, config_value JSONB NOT NULL)")
+                cur.execute(
+                    "INSERT INTO bot_rank_config VALUES (%s, %s::jsonb) ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value",
+                    ("ranks", json.dumps(config)),
+                )
+    else:
+        temporary = RANK_CONFIG_FILE + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        os.replace(temporary, RANK_CONFIG_FILE)
+
+
+def apply_rank_config(config):
+    ROBLOX_ROLE_VALUES.clear()
+    ROBLOX_ROLE_VALUES.update(config["ranks"])
+    DISCORD_RANK_LIMITS.clear()
+    DISCORD_RANK_LIMITS.update(config["limits"])
+
+
+async def can_rank(interaction):
+    return isinstance(interaction.user, discord.Member) and any(
+        str(role.id) in DISCORD_RANK_LIMITS for role in interaction.user.roles
+    )
+
+
+async def rank_autocomplete(interaction, current):
+    return [
+        app_commands.Choice(name=f"{name} [{value}]", value=name)
+        for name, value in ROBLOX_ROLE_VALUES.items()
+        if current.lower() in name.lower()
+    ][:25]
+
+
+rank_setup_group = app_commands.Group(name="rank_setup", description="Configure Roblox ranks and Discord ranking limits.")
+
+
+@rank_setup_group.command(name="show", description="Show the current ranks and Discord ranking limits.")
+@has_any_role(RANK_SETUP_ROLES)
+async def rank_setup_show(interaction: discord.Interaction):
+    payload = json.dumps({"ranks": ROBLOX_ROLE_VALUES, "limits": DISCORD_RANK_LIMITS}, indent=2)
+    import io
+    await interaction.response.send_message(
+        "Current ranking configuration:",
+        file=discord.File(io.BytesIO(payload.encode()), filename="rank_config.json"), ephemeral=True,
+    )
+
+
+async def update_rank_setup(interaction, section, key, value):
+    await interaction.response.defer(ephemeral=True)
+    async with rank_config_lock:
+        config = {"ranks": dict(ROBLOX_ROLE_VALUES), "limits": dict(DISCORD_RANK_LIMITS)}
+        if value is None:
+            if key not in config[section]:
+                await interaction.followup.send("That entry is not configured.", ephemeral=True)
+                return
+            del config[section][key]
+        else:
+            config[section][key] = value
+        try:
+            await asyncio.to_thread(write_rank_config, config)
+        except ValueError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
+        except Exception:
+            await interaction.followup.send("Could not save the configuration. Check storage/database connectivity. No changes were applied.", ephemeral=True)
+            return
+        apply_rank_config(config)
+    await interaction.followup.send("Ranking configuration saved. Changes apply immediately.", ephemeral=True)
+
+
+@rank_setup_group.command(name="set_rank", description="Add or update a Roblox rank name and numeric rank value.")
+@has_any_role(RANK_SETUP_ROLES)
+async def rank_setup_set_rank(interaction: discord.Interaction, name: str, value: app_commands.Range[int, 1, 255]):
+    await update_rank_setup(interaction, "ranks", name.strip(), value)
+
+
+@rank_setup_group.command(name="remove_rank", description="Remove a Roblox rank from the assignable ranks.")
+@has_any_role(RANK_SETUP_ROLES)
+@app_commands.autocomplete(name=rank_autocomplete)
+async def rank_setup_remove_rank(interaction: discord.Interaction, name: str):
+    await update_rank_setup(interaction, "ranks", name, None)
+
+
+@rank_setup_group.command(name="set_limit", description="Set a Discord role's maximum Roblox rank value (0 disables ranking).")
+@has_any_role(RANK_SETUP_ROLES)
+async def rank_setup_set_limit(interaction: discord.Interaction, role: discord.Role, maximum: app_commands.Range[int, 0, 255]):
+    await update_rank_setup(interaction, "limits", str(role.id), maximum)
+
 
 _roblox_csrf_token = None
 _group_roles_cache = None
@@ -285,7 +406,8 @@ def get_role_value(role_name: str) -> int | None:
 
     normalized_role_name = re.sub(r"[^a-z0-9]", "", role_name.lower())
 
-    configured_value = NORMALIZED_ROBLOX_ROLE_VALUES.get(normalized_role_name)
+    configured_value = next((value for name, value in ROBLOX_ROLE_VALUES.items()
+                             if re.sub(r"[^a-z0-9]", "", name.lower()) == normalized_role_name), None)
     if configured_value is not None:
         return configured_value
 
@@ -299,6 +421,10 @@ def get_role_value(role_name: str) -> int | None:
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
+    async with rank_config_lock:
+        config = await asyncio.to_thread(read_rank_config)
+        if config is not None:
+            apply_rank_config(config)
     load_motion_state()
     register_motion_views()
     restore_motion_timers()
@@ -620,15 +746,15 @@ async def announce_edit(
 
 # ===================== NEW: /RANK (WORKING) =====================
 @bot.tree.command(name="rank", description="Rank a Roblox user in the group (username or userId).")
-@has_any_role(list(DISCORD_RANK_LIMITS.keys()))
+@app_commands.check(can_rank)
 @app_commands.checks.cooldown(10, 3600, key=lambda i: i.user.id)
-@app_commands.choices(rank=RANK_CHOICES)
+@app_commands.autocomplete(rank=rank_autocomplete)
 @app_commands.describe(
     target="Roblox username or userId",
     rank="Rank to assign",
     reason="Reason for this action (required)"
 )
-async def rank(interaction: discord.Interaction, target: str, rank: app_commands.Choice[str], reason: str):
+async def rank(interaction: discord.Interaction, target: str, rank: str, reason: str):
     log_channel = bot.get_channel(RANK_LOG_CHANNEL_ID)
     max_allowed_value = get_max_allowed_rank_value(interaction.user)
     now = time.time()
@@ -648,7 +774,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
         old_role_name = get_current_role_name(user_id)
         current_value = get_role_value(old_role_name)
 
-        desired_role_name = rank.value
+        desired_role_name = rank
         desired_value = ROBLOX_ROLE_VALUES.get(desired_role_name)
 
         if current_value is None:
@@ -691,7 +817,7 @@ async def rank(interaction: discord.Interaction, target: str, rank: app_commands
     )
     embed.add_field(name="Executive", value=interaction.user.mention, inline=False)
     embed.add_field(name="Target", value=username if 'username' in locals() else target, inline=False)
-    embed.add_field(name="Old → New", value=f"{old_role_name if 'old_role_name' in locals() else 'Unknown'} → {rank.value}", inline=False)
+    embed.add_field(name="Old → New", value=f"{old_role_name if 'old_role_name' in locals() else 'Unknown'} → {rank}", inline=False)
     embed.add_field(name="Result", value=result, inline=False)
     embed.add_field(name="Reason", value=reason, inline=False)
     if error_message:
@@ -1472,6 +1598,7 @@ async def motion_status(interaction: discord.Interaction, motion_number: int):
     await interaction.response.send_message(embed=build_motion_embed(motion), ephemeral=True)
 
 # --- REGISTER GROUP COMMANDS ---
+bot.tree.add_command(rank_setup_group)
 bot.tree.add_command(applications_group)
 bot.tree.add_command(motion_group)
 
